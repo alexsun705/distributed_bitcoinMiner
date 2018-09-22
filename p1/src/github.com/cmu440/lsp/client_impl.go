@@ -36,7 +36,7 @@ func NewClient(hostport string, params *Params) (Client, error) {
     c := &client{
         serverConn: serverConn,
         serverAddr: serverAddr,
-        connID: connID, 
+        connID: -1, 
         currSeqNum: 1, 
         writeChan: make(chan []byte),
         writeBackChan: make(chan error),
@@ -50,6 +50,12 @@ func NewClient(hostport string, params *Params) (Client, error) {
     }
     c.writeConnChan <- 1
     err := <- c.writeBackChan
+    if (err != nil){
+        return (nil, err)
+    }
+    connID := <- c.connIDChan
+    c.connID = connID 
+    go c.mainRoutine()
     return (c, err)
 }
 
