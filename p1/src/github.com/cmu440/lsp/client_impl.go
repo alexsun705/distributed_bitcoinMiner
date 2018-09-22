@@ -2,13 +2,18 @@
 
 package lsp
 
-import "errors"
+import {
+    "errors"
+    "lspnet"
+    "encoding/json"
+}
+
 
 type client struct {
-    serverConn *UDPConn
+    clientConn *UDPConn
     serverAddr *UDPAddr
     connID int
-    currSeqNum int
+    curSeqNum int
     writeChan chan []byte // write request sends to this channel
     writeBackChan chan error // the chan sent back from main routine
     readChan chan int  // read request sends to this channel
@@ -31,13 +36,13 @@ type client struct {
 // and port number (i.e., "localhost:9999").
 func NewClient(hostport string, params *Params) (Client, error) {
     serverAddr := lspnet.ResolveUDPAddr("UDP", hostport)
-    serverConn := lspnet.DialUDP("UDP", nil, serverAddr)
+    clientConn := lspnet.DialUDP("UDP", nil, serverAddr)
     // to do: wait to receive ack from server
     c := &client{
-        serverConn: serverConn,
+        clientConn: clientConn,
         serverAddr: serverAddr,
         connID: -1, 
-        currSeqNum: 1, 
+        curSeqNum: 1, 
         writeChan: make(chan []byte),
         writeBackChan: make(chan error),
         readChan: make(chan int),
@@ -56,7 +61,7 @@ func NewClient(hostport string, params *Params) (Client, error) {
     connID := <- c.connIDChan
     c.connID = connID 
     go c.mainRoutine()
-    return (c, err)
+    return (c, nil)
 }
 
 func (c *client) ConnID() int {
@@ -94,7 +99,7 @@ func (c *client) sendMessage(original *Message){
         c.writeBackChan <- err
         continue
     }
-    c.currSeqNum += 1
+    c.curSeqNum += 1
     c.writeBackChan <- nil
 }
 
@@ -121,16 +126,25 @@ func makeCheckSum(connID, seqNum, size int, payload []byte) uint16 {
     return result
 }
 
+func integrityCheck(msg *Message) bool {
+    actualLen := len(msg.Payload)
+    expectedLen := msg.Size
+    actualChecksum := makeCheckSum(msg.ConnID, msg.SeqNum, msg.Size, msg.Payload)
+    expectedChecksum := msg.Checksum
+    return (actualLen == expectedLen) && (actualChecksum == expectedChecksum)
+
+}
+
 func (c *client) mainRoutine(){
     for{
         select{
             case payload <- writeChan:
-                checksum := makeCheckSum(c.connID, c.currSeqNum, len(payload), payload)
-                originalMsg := NewData(c.connID, c.currSeqNum, len(payload), payload, checksum)
+                checksum := makeCheckSum(c.connID, c.curSeqNum, len(payload), payload)
+                originalMsg := NewData(c.connID, c.curSeqNum, len(payload), payload, checksum)
                 c.sendMessage(originalMsg)
             
             case <- writeAckChan:
-                ack = NewAck(c.connID, c.currSeqNum)
+                ack = NewAck(c.connID, c.curSeqNum)
                 c.sendMessage(ack)
 
             case <- writeConnChan:
@@ -142,7 +156,5 @@ func (c *client) mainRoutine(){
         }   
     }
 }
-
-
 
 
