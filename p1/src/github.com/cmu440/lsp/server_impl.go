@@ -35,11 +35,12 @@ type s_client struct{//server side client structure
     //message to server.readReturnChan in future looping 
     stagePushChan chan *Message 
     
-    writeChan chan *Message//used to send signal to client through UDP
+    // writeChan chan *Message
+    writeBackChan chan *Message//used to send signal to client through UDP
 }
 
 type writeRequest struct{
-    conn int
+    connID int
     payload []byte
 }
 
@@ -55,6 +56,9 @@ type server struct {
 
     connectChan chan connectRequest // channel to set up new connections
     readReturnChan chan readReturn //channel to send message to Read() back
+    params *Params
+    writeRequestChan chan *writeRequest
+    writeBackChan chan error
 
 }
 // NewServer creates, initiates, and returns a new server. This function should
@@ -72,6 +76,7 @@ func NewServer(port int, params *Params) (Server, error) {
         curClientConnID: 1,
         readReturnChan: make(chan readReturn,500),
         connectChan: make(chan connectRequest),
+        params: params,
     }
     adr,err := lspnet.ResolveUDPAddr("udp",strconv.Itoa(port))
     if err != nil {
@@ -96,7 +101,13 @@ func (s *server) Read() (int, []byte, error) {
 }
 
 func (s *server) Write(connID int, payload []byte) error {
-    return errors.New("not yet implemented")
+    request := &writeRequest{
+        connID:connID,
+        payload:payload,
+    }
+    s.writeRequestChan <- request
+    err := <- s.writeBackChan
+    return err
 }
 
 func (s *server) CloseConn(connID int) error {
@@ -118,6 +129,21 @@ func (s *server) stillConnected(conn int) bool {
     return false
 }
 
+func (c *s_client) clientWrite(s *server){
+    for {
+        select{
+        case original <- c.writeBackChan:
+            msg, err := marshal(original)
+            if (err != nil){
+                s.writeBackChan <- err
+                continue
+            }
+            _, err := WriteToUDP(msg, c.addr)
+            s.writeBackChan <- err
+        }
+    }
+}
+
 func (s *server) mainRoutine() {
     for {
         select {
@@ -133,14 +159,32 @@ func (s *server) mainRoutine() {
                     appendChan: make(chan *Message),
                     stagePushChan: make(chan *Message),
                     writeChan: make(chan *Message),
+                    writeBackChan: make(chan *Message),
                 }
-                s.curClientConn +=1;
+                s.curClientConn += 1;
                 s.connectedClients = append(s.connectedClients, c)
                 go c.clientRead(&s)
                 go c.clientMain(&s)
-                ********** go c.clientWrite()
+                go c.clientWrite()
             }
-        *********** case //write, ack, whatever channel
+        case request := <- s.writeRequestChan:
+            // in this case it must be 
+            connID := request.connID
+            payload := request.payload
+            client := nil
+            for (i := 0; i < len(s.connectedClients); i++){
+                if s.connectedClients[i].connID == connID{
+                    client = s.connectedClients[i]
+                    break
+                }
+            }
+            if (client != nil){
+                seqNum = s.curDataSeqNum
+                size = len(payload)
+                checksum = makeCheckSum(connID, seqNum, size, payload)
+                data := NewData(connID, seqNum, size, payload, checksum)
+                client.writeBackChan <- data
+            }
         }
     }
 }
@@ -211,8 +255,9 @@ func (client *s_client) clientRead(s *server) {
         var b [2000]byte
         size,addr,err := serverConn.ReadFromUDP(b)
         if err != nil {//deal with error later
-            *************message := unMarshal(b,size)//unMarshall returns *Message
-            if ...{//check integrity here with checksum and size 
+            v := &Message{}
+            unmarshal(b,v)//unMarshall returns *Message
+            if integrityCheck(v){//check integrity here with checksum and size 
                 if (message.Type == MsgData){
                     seq := message.SeqNum
                     if (seq > client.seqExpected){//out of order, pending
@@ -223,14 +268,16 @@ func (client *s_client) clientRead(s *server) {
                         client.stagePushChan <- message
                     }
                     //else if seq <seqExpected, then don't worry about returning it
-                    *********** //send ack back
+                    ack := NewAck(v.connID, v.seqNum)
+                    client.writeBackChan <- ack
                 } else if (message.Type == MsgConnect){
                     request := connectRequest{
                         message,
                         addr,
                     }
                     s.connectChan <- &request//make new server side client struct
-                    **** // send ack0 back
+                    ack := NewAck(c.connID, 0)
+                    c.writeBackChan <- ack
                 }
                 //if its ACK, do sth later for epoch
 
