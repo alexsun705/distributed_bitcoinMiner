@@ -4,9 +4,10 @@ package lsp
 
 import (
     "errors"
-    "lspnet"
-    "encoding/json"
+    "github.com/cmu440/lspnet"
+    
     "strconv"
+    "strings"
 )
 
 type readReturn struct{
@@ -17,10 +18,10 @@ type readReturn struct{
 }
 type connectRequest struct{
     message *Message
-    addr *UDPAddr
+    addr *lspnet.UDPAddr
 }
 type s_client struct{//server side client structure
-    addr *UDPAddr
+    addr *lspnet.UDPAddr
     seqExpected int//start with one
     connID int
     writeSeqNum int // used for writing, start with 1
@@ -34,15 +35,14 @@ type s_client struct{//server side client structure
 
     //signal clientMain to stage the push message, so clientMain can try to push
     //message to server.readReturnChan in future looping 
-    stagePushChan chan *Message 
-    
-    // writeChan chan *Message
-    writeBackChan chan *Message//used to send signal to client through UDP
+    stagePushChan chan *Message
+    clientCloseChan chan int
+
 }
 
 type writeAckRequest struct{
     ack *Message
-    c *s_client
+    client *s_client
 }
 
 type writeRequest struct{
@@ -52,20 +52,26 @@ type writeRequest struct{
 
 type server struct {
     // TODO: implement this!
-    serverConn *UDPConn
-    serverAddr *UDPAddr
+    serverConn *lspnet.UDPConn
+    serverAddr *lspnet.UDPAddr
     connectedClients []*s_client
     //start at 1, sequence number of data messages sent from server
     curDataSeqNum int 
     //start at 1, connID to be assigned when next new connection is made
     curClientConnID int 
 
-    connectChan chan connectRequest // channel to set up new connections
-    readReturnChan chan readReturn //channel to send message to Read() back
+    newClientChan chan *s_client
+    connectChan chan *connectRequest // channel to set up new connections
+    readReturnChan chan *readReturn //channel to send message to Read() back
     params *Params
     writeRequestChan chan *writeRequest
     writeAckChan chan *writeAckRequest
     writeBackChan chan error
+
+    clientRemoveChan chan *s_client
+    mainCloseChan chan int
+    readCloseChan chan int
+
 
 }
 // NewServer creates, initiates, and returns a new server. This function should
@@ -78,24 +84,32 @@ func NewServer(port int, params *Params) (Server, error) {
     s := server{
         serverConn: nil,
         serverAddr: nil,
-        connectedClient: make([]*s_client,5),
+        connectedClients: make([]*s_client,5),
         curDataSeqNum: 1,
         curClientConnID: 1,
-        readReturnChan: make(chan readReturn,500),
-        connectChan: make(chan connectRequest),
+        newClientChan: make(chan *s_client),
+        connectChan: make(chan *connectRequest),
+        readReturnChan: make(chan *readReturn,500),
         params: params,
+        writeRequestChan: make(chan *writeRequest),
+        writeAckChan: make(chan *writeAckRequest),
+        writeBackChan: make(chan error),
+        clientRemoveChan: make(chan *s_client),
+        mainCloseChan: make(chan int),
+        readCloseChan: make(chan int),
     }
-    adr,err := lspnet.ResolveUDPAddr("udp",strconv.Itoa(port))
+    adr,err := lspnet.ResolveUDPAddr("udp","localhost:"+strconv.Itoa(port))
     if err != nil {
-        return (nil,err)
+        return nil, err
     }
     s.serverAddr = adr
     conn, err := lspnet.ListenUDP("udp", s.serverAddr)
     if err != nil {
-        return (nil,err)
+        return nil, err
     }
     s.serverConn=conn
     go s.mainRoutine()
+    go s.readRoutine()
     return &s,nil
 }
 
@@ -118,42 +132,45 @@ func (s *server) Write(connID int, payload []byte) error {
 }
 
 func (s *server) CloseConn(connID int) error {
-    return errors.New("not yet implemented")
+
+    sClient := s.searchClientToClose(connID)
+    if sClient!=nil {
+        sClient.clientCloseChan <- 1
+        s.clientRemoveChan <- sClient //could have issues, if removing client
+        return nil
+    }
+    return errors.New("connection already closed")
 }
 
 func (s *server) Close() error {
-    return errors.New("not yet implemented")
+    s.mainCloseChan <-1
+    s.readCloseChan <-1
+    return nil
 }
-
-//check if a connection is
-func (s *server) stillConnected(conn int) bool {
-    n := len(s.connectedClients)
-    for i := 0; i < n; i++ {
-        if (s.connectedClients[i].conn == conn){
-            return true
+func (s *server) searchClientToClose (connID int) *s_client {
+    for i := 0; i < len(s.connectedClients); i++ {
+        sClient :=  s.connectedClients[i]
+        if (sClient.connID == connID) {
+            return sClient
         }
     }
-    return false
+    return nil
 }
-
-func (c *s_client) clientWrite(s *server){
-    for {
-        select{
-        case original:= <- c.writeBackChan:
-            msg, err := marshal(original)
-            if (err != nil){
-                s.writeBackChan <- err
-                continue
-            }
-            _, err := s.serverConn.WriteToUDP(msg, c.addr)
-            s.writeBackChan <- err
-        }
-    }
-}
-
 func (s *server) mainRoutine() {
     for {
         select {
+        case <- s.mainCloseChan:
+            for i := 0; i < len(s.connectedClients); i++ {
+                s.connectedClients[i].clientCloseChan <- 1
+            }
+            return
+        case sClient := <- s.clientRemoveChan:
+            for i := 0; i < len(s.connectedClients); i++ {
+                if (s.connectedClients[i].connID == sClient.connID) {
+                    s.connectedClients = append(s.connectedClients[:i], s.connectedClients[i+1:]...)
+                    break
+                }
+            }
         case request := <- s.connectChan://set up connection
             message := request.message
             if (message.Type == MsgConnect){//start a new server side client
@@ -161,58 +178,133 @@ func (s *server) mainRoutine() {
                     addr: request.addr,
                     seqExpected: 1,
                     writeSeqNum: 1,
-                    connID: s.curClientConn,
+                    connID: s.curClientConnID,
                     messageToPush: nil,
                     pendingMessages: make([]*Message, 5),
                     appendChan: make(chan *Message),
                     stagePushChan: make(chan *Message),
-                    writeChan: make(chan *Message),
-                    writeBackChan: make(chan *Message),
+                    clientCloseChan: make(chan int),
                 }
-                s.curClientConn += 1;
+                s.curClientConnID += 1;
                 s.connectedClients = append(s.connectedClients, c)
-                go c.clientRead(&s)
-                go c.clientMain(&s)
+                s.newClientChan <- c//let read routine create ack request
+                go c.clientMain(s)
             }
         
         case request := <- s.writeRequestChan:
             // write data to client
             connID := request.connID
             payload := request.payload
-            client := nil
-            for (i := 0; i < len(s.connectedClients); i++){
-                if s.connectedClients[i].ConnID == connID{
-                    client = s.connectedClients[i]
+            var sClient *s_client = nil
+            for i := 0; i < len(s.connectedClients); i++{
+                if s.connectedClients[i].connID == connID{
+                    sClient = s.connectedClients[i]
                     break
                 }
             }
-            if (client != nil){
-                seqNum = c.writeSeqNum
-                size = len(payload)
-                checksum = makeCheckSum(connID, seqNum, size, payload)
+            if (sClient != nil){
+                seqNum := sClient.writeSeqNum
+                size := len(payload)
+                checksum := makeCheckSum(connID, seqNum, size, payload)
                 original := NewData(connID, seqNum, size, payload, checksum)
                 msg, err := marshal(original)
                 if (err != nil){
                     s.writeBackChan <- err
                     continue
                 }
-                _, err := s.serverConn.WriteToUDP(msg, client.addr)
+                num, err := s.serverConn.WriteToUDP(msg, sClient.addr)
+                _ = num
                 if (err == nil){
-                    client.writeSeqNum += 1
+                    sClient.writeSeqNum += 1
                 }
                 s.writeBackChan <- err
             } else {
                 err := errors.New("This client does not exist")
                 s.writeBackChan <- err
             }
-        }
 
         // write ack to client
         case ackRequest := <- s.writeAckChan:
             ack := ackRequest.ack
-            c := ackRequest.c
-            connID := ack.ConnID
-            _, err := s.serverConn.WriteToUDP(ack, c.addr)
+            sClient := ackRequest.client
+            byteMessage,err := marshal(ack)
+            _ = err//deal with later?
+            num, err := s.serverConn.WriteToUDP(byteMessage, sClient.addr)
+            _ = num
+            _ = err//deal with later?
+        }
+    }
+}
+func (s *server) searchClient(addr *lspnet.UDPAddr) *s_client {
+    for i := 0; i < len(s.connectedClients); i++ {
+        sClient :=  s.connectedClients[i]
+        if (strings.Compare(sClient.addr.String(),addr.String())==0) {
+            return sClient
+        }
+    }
+    return nil
+}
+func (s *server) readRoutine() {
+    for {
+        select{
+        case <-s.readCloseChan:
+            return
+        default:
+            serverConn := s.serverConn
+            var b []byte
+            size,addr,err := serverConn.ReadFromUDP(b)
+            _ = size
+            if err != nil {//deal with error later
+                message := &Message{} //store message
+                unmarshal(b,message)//unMarshall returns *Message
+                if integrityCheck(message){//check integrity here with checksum and size 
+                    if (message.Type == MsgData){
+                        sClient := s.searchClient(addr)//make sure client connected
+                        seq := message.SeqNum
+                        if (sClient != nil){
+                            if (seq > sClient.seqExpected){//out of order, pending
+                                sClient.appendChan <- message
+                            }
+                            if (seq == sClient.seqExpected){
+                                //let clientMain try pushing message to s.readReturnChan
+                                sClient.stagePushChan <- message
+                            }
+
+                            //else if seq <seqExpected, then don't worry about returning it to Read()
+                            ack := NewAck(message.ConnID, message.SeqNum)
+                            ackRequest := &writeAckRequest{
+                                ack: ack,
+                                client: sClient,
+                            }
+                            s.writeAckChan <- ackRequest
+                        }
+                    } else if (message.Type == MsgConnect){
+                        request := &connectRequest{
+                            message,
+                            addr,
+                        }
+                        //check if the client is already connected on the server end
+                        newClient :=s.searchClient(addr)
+                        var sClient *s_client = nil
+                        if (newClient==nil){//first connect message
+                            s.connectChan <- request
+                            sClient = <- s.newClientChan//wait for new client from main
+                        } else{
+                            sClient = newClient
+                        }
+                        //make new server side client struct in mainRoutine
+                        ack := NewAck(sClient.connID, 0)
+                        ackRequest := &writeAckRequest{
+                            ack: ack,
+                            client: sClient,
+                        }
+                        s.writeAckChan <- ackRequest
+                    //if its ACK, do sth later for epoch
+                    }
+
+                }
+            }
+        }    
     }
 }
 func (c *s_client) alreadyReceived(seq int) bool {
@@ -224,51 +316,56 @@ func (c *s_client) alreadyReceived(seq int) bool {
     }
     return false
 }
-//would block until Read() is called once
-func (client *s_client) clientMain(s *server){
+//would block until Read() is called
+//mainly deal with out of order messages on each client
+//append out of order messages to pendingMessages, try to push the correct 
+//message to s.readReturnChan when have one
+func (sClient *s_client) clientMain(s *server){
     for {
         //if messageToPush is good, we would try to push to s.readReturnChan
-        if (client.messageToPush!=nil && client.messageToPush.seqNum==client.seqExpected){
+        var readReturnChan chan *readReturn = nil
+        if (sClient.messageToPush!=nil && sClient.messageToPush.seqNum==sClient.seqExpected){
             readReturnChan := s.readReturnChan
-        } else{
-            readReturnChan := nil
+            _ = readReturnChan
         }
 
         select {
-        case message:= <- client.appendChan:// append out of order message
-            if !client.alreadyReceived(message.SeqNum) {
-                client.pendingMessages = append(client.pendingMessages,message)
+        case <- sClient.clientCloseChan: //CloseConn or Close called
+            return
+        case message:= <- sClient.appendChan:// append out of order message
+            if !sClient.alreadyReceived(message.SeqNum) {
+                sClient.pendingMessages = append(sClient.pendingMessages,message)
             }
-        case message:= <- client.stagePushChan: //
-            if (message.SeqNum == client.seqExpected){
+        case message:= <- sClient.stagePushChan: //
+            if (message.SeqNum == sClient.seqExpected){
                 wrapMessage := &readReturn{
                     connID: message.ConnID,
                     seqNum: message.SeqNum,
-                    payload: message.PayLoad,
+                    payload: message.Payload,
                     err: nil,
                 }
-                client.messageToPush = wrapMessage
+                sClient.messageToPush = wrapMessage
             }
-        case readReturnChan <- client.messageToPush:
+        case readReturnChan <- sClient.messageToPush:
             //if entered here, means we just pushed the message with seqNum
             //client.seqExpected to the main readReturnChan, thus need to update
             //and check whether we have pendingMessages that can be 
-            client.seqExpected +=1
+            sClient.seqExpected +=1
             //go through pending messages and check if already received the next  
             //message in order, check againt client.seqExpected
-            for i := 0; i < len(client.pendingMessages); i++ {
-                message := client.pendingMessages[i]
-                if (message.SeqNum == client.seqExpected){
+            for i := 0; i < len(sClient.pendingMessages); i++ {
+                message := sClient.pendingMessages[i]
+                if (message.SeqNum == sClient.seqExpected){
                     //make sure sending messages out in order
                     wrapMessage := &readReturn{
                         connID: message.ConnID,
                         seqNum: message.SeqNum,
-                        payload: message.PayLoad,
+                        payload: message.Payload,
                         err: nil,
                     }
-                    client.messageToPush = wrapMessage
+                    sClient.messageToPush = wrapMessage
                     //cut this message off pendingMessages
-                    client.pendingMessages = append(client.pendingMessages[:i], client.pendingMessages[i+1:]...)
+                    sClient.pendingMessages = append(sClient.pendingMessages[:i], sClient.pendingMessages[i+1:]...)
                    
                     break //make sure only push one message to the read()
                 }
@@ -276,49 +373,7 @@ func (client *s_client) clientMain(s *server){
         }
     }
 }
-func (client *s_client) clientRead(s *server) {
-    for {
-        serverConn := s.serverConn
-        var b [2000]byte
-        size,addr,err := serverConn.ReadFromUDP(b)
-        if err != nil {//deal with error later
-            v := &Message{}
-            unmarshal(b,v)//unMarshall returns *Message
-            if integrityCheck(v){//check integrity here with checksum and size 
-                if (message.Type == MsgData){
-                    seq := message.SeqNum
-                    if (seq > client.seqExpected){//out of order, pending
-                        client.appendChan <- message
-                    }
-                    if (seq == client.seqExpected){
-                        //let clientMain try pushing message to s.readReturnChan
-                        client.stagePushChan <- message
-                    }
-                    //else if seq <seqExpected, then don't worry about returning it
-                    ack := NewAck(v.ConnID, v.SeqNum)
-                    ackRequest = &writeAckRequest{
-                        ack: ack,
-                        c: client
-                    }
-                    s.writeAckChan <- ackRequest
-                } else if (message.Type == MsgConnect){
-                    request := connectRequest{
-                        message,
-                        addr,
-                    }
-                    s.connectChan <- &request//make new server side client struct
-                    ack := NewAck(c.connID, 0)
-                    ackRequest = &writeAckRequest{
-                        ack: ack,
-                        c: client
-                    }
-                    s.writeAckChan <- ackRequest
-                //if its ACK, do sth later for epoch
-            }
 
-        }
-    }
-}
 
 
 
