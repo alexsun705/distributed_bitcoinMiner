@@ -14,12 +14,26 @@ type client struct {
     serverAddr *UDPAddr
     connID int
     curSeqNum int
+    seqExpected int
+
+    //Read
+    messageToPush *readReturn //save the one message to return to Read()
+    pendingMessages []*Message //save out of order messages
+    appendChan chan *Message //signal clientMain append to pendingMessages
+    //signal clientMain to stage the push message, so clientMain can try to push
+    //message to server.readReturnChan in future looping 
+    stagePushChan chan *Message
+    readReturnChan chan readReturn //channel to send message to Read() back
+
+    //Write
+    
     writeChan chan []byte // write request sends to this channel
     writeBackChan chan error // the chan sent back from main routine
     readChan chan int  // read request sends to this channel
     payloadChan chan []byte // where payload is sent from main routine
     writeAckChan chan int // ack is going to be sent
     writeConnChan chan int // connect is going to be sent
+    connIDChan chan int
     connIDRequestChan chan int // when function connID() calls send data to this channel
     connIDReturnChan chan int // the function returns value from this channel
 }
@@ -42,7 +56,13 @@ func NewClient(hostport string, params *Params) (Client, error) {
         clientConn: clientConn,
         serverAddr: serverAddr,
         connID: -1, 
-        curSeqNum: 1, 
+        curSeqNum: 1,
+        seqExpected: 1,
+        messageToPush: nil, //save the one message to return to Read()
+        appendChan: make(chan *Message), 
+        stagePushChan: make(chan *Message),
+        readReturnChan: make(chan readReturn), //channel to send message to Read() back
+        pendingMessages: make([]*Message,5),
         writeChan: make(chan []byte),
         writeBackChan: make(chan error),
         readChan: make(chan int),
@@ -53,14 +73,17 @@ func NewClient(hostport string, params *Params) (Client, error) {
         connIDRequestChan: make(chan int),
         connIDReturnChan: make(chan int),
     }
-    c.writeConnChan <- 1
-    err := <- c.writeBackChan
-    if (err != nil){
-        return (nil, err)
-    }
+    
+    
     connID := <- c.connIDChan
     c.connID = connID 
     go c.mainRoutine()
+    go c.readRoutine()
+    c.writeConnChan <- 1 //assume 
+    //err := <- c.writeBackChan
+    //if (err != nil){
+        //return (nil, err)
+    //}
     return (c, nil)
 }
 
@@ -71,9 +94,8 @@ func (c *client) ConnID() int {
 }
 
 func (c *client) Read() ([]byte, error) {
-    // TODO: remove this line when you are ready to begin implementing this method.
-    select {} // Blocks indefinitely.
-    return nil, errors.New("not yet implemented")
+    message := <- c.readReturnChan
+    return message.payload,message.err
 }
 
 func (c *client) Write(payload []byte) error {
@@ -88,19 +110,22 @@ func (c *client) Close() error {
 
 
 // other functions defined below
+//send ACK,CONN or DATA message to server
+//send err back to Write() call when sending out Data message
 func (c *client) sendMessage(original *Message){
     msg, err = marshal(original)
-    if (err != nil){
+    if (err != nil && original.Type == MsgData){
         c.writeBackChan <- err
-        continue
+        return
     }
     _, err := WriteToUDP(msg, c.serverAddr)
-    if (err != nil){
+    if (err != nil && original.Type == MsgData){
         c.writeBackChan <- err
-        continue
+        return
     }
-    c.curSeqNum += 1
-    c.writeBackChan <- nil
+    if (original.Type == MsgData){
+        c.writeBackChan <- nil
+    }
 }
 
 func marshal(msg *Message) ([]byte, error) {
@@ -134,27 +159,109 @@ func integrityCheck(msg *Message) bool {
     return (actualLen == expectedLen) && (actualChecksum == expectedChecksum)
 
 }
+func (c *client) received(seq int) bool {
+    n := len(c.pendingMessages)
+    for i := 0; i < n; i++ {
+        if (c.pendingMessages[i].SeqNum == seq){
+            return true
+        }
+    }
+    return false
+}
 
 func (c *client) mainRoutine(){
     for{
+        if (c.messageToPush!=nil && c.messageToPush.seqNum==c.seqExpected){
+            readReturnChan := c.readReturnChan
+        } else{
+            readReturnChan := nil
+        }
         select{
-            case payload <- writeChan:
+            //write channels
+            case payload:= <- c.writeChan:
                 checksum := makeCheckSum(c.connID, c.curSeqNum, len(payload), payload)
                 originalMsg := NewData(c.connID, c.curSeqNum, len(payload), payload, checksum)
                 c.sendMessage(originalMsg)
+                c.curSeqNum += 1
             
-            case <- writeAckChan:
-                ack = NewAck(c.connID, c.curSeqNum)
+            case seqNum := <- c.writeAckChan:
+                ack := NewAck(c.connID, seqNum)
                 c.sendMessage(ack)
 
-            case <- writeConnChan:
-                conn = NewConnect()
+            case <- c.writeConnChan:
+                conn := NewConnect()
                 c.sendMessage(conn)
 
-            case <- connIDRequestChan:
-                c.connIDRequestChan <- c.connID
+            case <- c.connIDRequestChan:
+                c.connIDReturnChan <- c.connID
+            
+            //Reading channels, same with server implementation
+            case message:= <- c.appendChan:// append out of order message
+                if !c.received(message.SeqNum) {
+                    client.pendingMessages = append(client.pendingMessages,message)
+                }
+            case message:= <- c.stagePushChan: //prepare for a push to readReturn
+                if (message.SeqNum == c.seqExpected){
+                    wrapMessage := &readReturn{
+                        connID: message.ConnID,
+                        seqNum: message.SeqNum,
+                        payload: message.PayLoad,
+                        err: nil,
+                    }
+                    c.messageToPush = wrapMessage
+                }
+            case readReturnChan <- c.messageToPush:
+                //if entered here, means we just pushed the message with seqNum
+                //client.seqExpected to the main readReturnChan, thus need to update
+                //and check whether we have pendingMessages that can be 
+                c.seqExpected +=1
+                //go through pending messages and check if already received the next  
+                //message in order, check againt client.seqExpected
+                for i := 0; i < len(c.pendingMessages); i++ {
+                    message := c.pendingMessages[i]
+                    if (message.SeqNum == c.seqExpected){
+                        //make sure sending messages out in order
+                        wrapMessage := &readReturn{
+                            connID: message.ConnID,
+                            seqNum: message.SeqNum,
+                            payload: message.PayLoad,
+                            err: nil,
+                        }
+                        c.messageToPush = wrapMessage
+                        //cut this message off pendingMessages
+                        c.pendingMessages = append(c.pendingMessages[:i], c.pendingMessages[i+1:]...)
+                        break //make sure only push one message to the read()
+                    }
+                }
         }   
     }
 }
 
+func (c *client) readRoutine() {
+    for {
+        var b [2000]byte
+        size,addr,err := c.clientConn.ReadFromUDP(b)
+        if err != nil {//deal with error later
+            message := &Message{}
+            unmarshal(b, message)//unMarshall returns *Message
+            if integrityCheck(message){//check integrity here with checksum and size 
+                if (message.Type == MsgData){
+                    seq := message.SeqNum
+                    if (seq > c.seqExpected){//out of order, pending
+                        c.appendChan <- message
+                    }
+                    if (seq == c.seqExpected){
+                        //let clientMain try pushing message to s.readReturnChan
+                        c.stagePushChan <- message
+                    }
+                    c.writeAckChan <- seq //signal to send Ack back
+                }
+                //if its ACK, do sth later for epoch
+            }
+        } else{//deal with error
+            return //connection lost?
+        }
+        
+    }
+}
 

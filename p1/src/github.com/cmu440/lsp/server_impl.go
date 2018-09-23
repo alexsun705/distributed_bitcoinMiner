@@ -132,7 +132,7 @@ func (s *server) stillConnected(conn int) bool {
 func (c *s_client) clientWrite(s *server){
     for {
         select{
-        case original <- c.writeBackChan:
+        case original:= <- c.writeBackChan:
             msg, err := marshal(original)
             if (err != nil){
                 s.writeBackChan <- err
@@ -208,6 +208,14 @@ func (client *s_client) clientMain(s *server){
         }
 
         select {
+        case original:= <- client.writeBackChan:
+            msg, err := marshal(original)
+            if (err != nil){
+                s.writeBackChan <- err
+                continue
+            }
+            _, err := WriteToUDP(msg, c.addr)
+            s.writeBackChan <- err
         case message:= <- client.appendChan:// append out of order message
             if !client.alreadyReceived(message.SeqNum) {
                 client.pendingMessages = append(client.pendingMessages,message)
