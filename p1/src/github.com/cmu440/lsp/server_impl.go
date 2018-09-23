@@ -23,6 +23,7 @@ type s_client struct{//server side client structure
     addr *UDPAddr
     seqExpected int//start with one
     connID int
+    writeSeqNum int // used for writing, start with 1
     messageToPush *readReturn
     //received data messages that is not read yet, no duplicates
     // seq number of messages in pendingMessages >= seqExpected
@@ -37,6 +38,11 @@ type s_client struct{//server side client structure
     
     // writeChan chan *Message
     writeBackChan chan *Message//used to send signal to client through UDP
+}
+
+type writeAckRequest struct{
+    ack *Message
+    c *s_client
 }
 
 type writeRequest struct{
@@ -58,6 +64,7 @@ type server struct {
     readReturnChan chan readReturn //channel to send message to Read() back
     params *Params
     writeRequestChan chan *writeRequest
+    writeAckChan chan *writeAckRequest
     writeBackChan chan error
 
 }
@@ -138,7 +145,7 @@ func (c *s_client) clientWrite(s *server){
                 s.writeBackChan <- err
                 continue
             }
-            _, err := WriteToUDP(msg, c.addr)
+            _, err := s.serverConn.WriteToUDP(msg, c.addr)
             s.writeBackChan <- err
         }
     }
@@ -153,6 +160,7 @@ func (s *server) mainRoutine() {
                 c := &s_client{//need to adapt to new struct
                     addr: request.addr,
                     seqExpected: 1,
+                    writeSeqNum: 1,
                     connID: s.curClientConn,
                     messageToPush: nil,
                     pendingMessages: make([]*Message, 5),
@@ -165,27 +173,46 @@ func (s *server) mainRoutine() {
                 s.connectedClients = append(s.connectedClients, c)
                 go c.clientRead(&s)
                 go c.clientMain(&s)
-                go c.clientWrite()
             }
+        
         case request := <- s.writeRequestChan:
-            // in this case it must be 
+            // write data to client
             connID := request.connID
             payload := request.payload
             client := nil
             for (i := 0; i < len(s.connectedClients); i++){
-                if s.connectedClients[i].connID == connID{
+                if s.connectedClients[i].ConnID == connID{
                     client = s.connectedClients[i]
                     break
                 }
             }
             if (client != nil){
-                seqNum = s.curDataSeqNum
+                seqNum = c.writeSeqNum
                 size = len(payload)
                 checksum = makeCheckSum(connID, seqNum, size, payload)
-                data := NewData(connID, seqNum, size, payload, checksum)
-                client.writeBackChan <- data
+                original := NewData(connID, seqNum, size, payload, checksum)
+                msg, err := marshal(original)
+                if (err != nil){
+                    s.writeBackChan <- err
+                    continue
+                }
+                _, err := s.serverConn.WriteToUDP(msg, client.addr)
+                if (err == nil){
+                    client.writeSeqNum += 1
+                }
+                s.writeBackChan <- err
+            } else {
+                err := errors.New("This client does not exist")
+                s.writeBackChan <- err
             }
         }
+
+        // write ack to client
+        case ackRequest := <- s.writeAckChan:
+            ack := ackRequest.ack
+            c := ackRequest.c
+            connID := ack.ConnID
+            _, err := s.serverConn.WriteToUDP(ack, c.addr)
     }
 }
 func (c *s_client) alreadyReceived(seq int) bool {
@@ -208,14 +235,6 @@ func (client *s_client) clientMain(s *server){
         }
 
         select {
-        case original:= <- client.writeBackChan:
-            msg, err := marshal(original)
-            if (err != nil){
-                s.writeBackChan <- err
-                continue
-            }
-            _, err := WriteToUDP(msg, c.addr)
-            s.writeBackChan <- err
         case message:= <- client.appendChan:// append out of order message
             if !client.alreadyReceived(message.SeqNum) {
                 client.pendingMessages = append(client.pendingMessages,message)
@@ -276,8 +295,12 @@ func (client *s_client) clientRead(s *server) {
                         client.stagePushChan <- message
                     }
                     //else if seq <seqExpected, then don't worry about returning it
-                    ack := NewAck(v.connID, v.seqNum)
-                    client.writeBackChan <- ack
+                    ack := NewAck(v.ConnID, v.SeqNum)
+                    ackRequest = &writeAckRequest{
+                        ack: ack,
+                        c: client
+                    }
+                    s.writeAckChan <- ackRequest
                 } else if (message.Type == MsgConnect){
                     request := connectRequest{
                         message,
@@ -285,10 +308,12 @@ func (client *s_client) clientRead(s *server) {
                     }
                     s.connectChan <- &request//make new server side client struct
                     ack := NewAck(c.connID, 0)
-                    c.writeBackChan <- ack
-                }
+                    ackRequest = &writeAckRequest{
+                        ack: ack,
+                        c: client
+                    }
+                    s.writeAckChan <- ackRequest
                 //if its ACK, do sth later for epoch
-
             }
 
         }
