@@ -124,7 +124,9 @@ func (ts *testSystem) randSleep() {
 func (ts *testSystem) runClient(clientID int, doneChan chan<- bool) {
 	defer ts.t.Log("Client shutting down...")
 	cli := ts.clients[clientID]
+	fmt.Println("test: before client connID")
 	connID := cli.ConnID()
+	fmt.Printf("test: client connID %v \n", connID)
 	for i := 0; i < ts.numMsgs; i++ {
 		select {
 		case <-ts.exitChan:
@@ -132,6 +134,7 @@ func (ts *testSystem) runClient(clientID int, doneChan chan<- bool) {
 		default:
 			wt := rand.Intn(100)
 			writeBytes, _ := json.Marshal(i + wt)
+			fmt.Println("test: before client write")
 			err := cli.Write(writeBytes)
 			ts.t.Logf("Client %d wrote message %d (%d of %d).", connID, i+wt, i+1, ts.numMsgs)
 			if err != nil {
@@ -169,6 +172,7 @@ func (ts *testSystem) runTest(timeout int) {
 	clientDoneChan := make(chan bool, ts.numClients)
 	go ts.runServer()
 	for i := range ts.clients {
+		fmt.Println("test: before run client test")
 		go ts.runClient(i, clientDoneChan)
 	}
 	timeoutChan := time.After(time.Duration(timeout) * time.Millisecond)
@@ -200,6 +204,7 @@ func makeParams(epochLimit, epochMillis, windowSize int) *Params {
 }
 
 func TestBasic1(t *testing.T) {
+	fmt.Println("test1: before test")
 	newTestSystem(t, 1, makeParams(5, 2000, 1)).
 		setDescription("TestBasic1: Short client/server interaction").
 		setNumMsgs(3).

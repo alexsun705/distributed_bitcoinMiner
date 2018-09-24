@@ -4,7 +4,9 @@ package lsp
 
 import (
     "github.com/cmu440/lspnet"
+    //"github.com/cmu440/lspnet" ********* need to use this on autolab
     "encoding/json"
+    "fmt"
 )
 
 
@@ -52,6 +54,7 @@ type client struct {
 // and port number (i.e., "localhost:9999").
 func NewClient(hostport string, params *Params) (Client, error) {
     serverAddr,err := lspnet.ResolveUDPAddr("udp", hostport)
+    fmt.Println(serverAddr)
     if (err!=nil){
         return nil, err
     }
@@ -88,7 +91,7 @@ func NewClient(hostport string, params *Params) (Client, error) {
     go c.mainRoutine()
     go c.readRoutine()
     c.writeConnChan <- 1
-     //assume gonna get ack back
+    //assume gonna get ack back
 
     //insert routine to wait for ack and block later
 
@@ -109,6 +112,7 @@ func (c *client) Read() ([]byte, error) {
 }
 
 func (c *client) Write(payload []byte) error {
+    fmt.Println("client: before send write request")
     c.writeChan <- payload
     res := <- c.writeBackChan
     return res
@@ -130,9 +134,11 @@ func (c *client) sendMessage(original *Message){
         c.writeBackChan <- err
         return
     }
-    num, err := c.clientConn.WriteToUDP(msg, c.serverAddr)
+    num, err := c.clientConn.Write(msg)
+    fmt.Println("client: conn sent")
     _ = num
     if (err != nil && original.Type == MsgData){
+        fmt.Println("client: there is error")
         c.writeBackChan <- err
         return
     }
@@ -169,6 +175,9 @@ func makeCheckSum(connID, seqNum, size int, payload []byte) uint16 {
 }
 
 func integrityCheck(msg *Message) bool {
+    if msg.Type == MsgConnect || msg.Type == MsgAck{
+        return true
+    }
     actualLen := len(msg.Payload)
     expectedLen := msg.Size
     actualChecksum := makeCheckSum(msg.ConnID, msg.SeqNum, msg.Size, msg.Payload)
@@ -262,10 +271,10 @@ func (c *client) readRoutine() {
             return
         default:
             var b []byte
-            size,addr,err := c.clientConn.ReadFromUDP(b)
-            c.serverAddr = addr
-            _ = size //not needed?
-            if err != nil {//deal with error later
+            n,err := c.clientConn.Read(b)
+            fmt.Println("client: got ack")
+            _ = n
+            if err == nil {//deal with error later
                 message := &Message{}
                 unmarshal(b, message)//unMarshall returns *Message
                 if integrityCheck(message){//check integrity here with checksum and size 
@@ -288,6 +297,7 @@ func (c *client) readRoutine() {
                     //if its ACK, do sth later for epoch
                 }
             } else{//deal with error
+                fmt.Println("client: got error")
                 return //connection lost?
             }
         }

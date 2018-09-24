@@ -5,9 +5,10 @@ package lsp
 import (
     "errors"
     "github.com/cmu440/lspnet"
-    
+    //"github.com/cmu440/lspnet" ********* need to use this on autolab
     "strconv"
     "strings"
+    "fmt"
 )
 
 type readReturn struct{
@@ -84,7 +85,7 @@ func NewServer(port int, params *Params) (Server, error) {
     s := server{
         serverConn: nil,
         serverAddr: nil,
-        connectedClients: make([]*s_client,5),
+        connectedClients: make([]*s_client, 0),
         curDataSeqNum: 1,
         curClientConnID: 1,
         newClientChan: make(chan *s_client),
@@ -103,8 +104,10 @@ func NewServer(port int, params *Params) (Server, error) {
         return nil, err
     }
     s.serverAddr = adr
+    fmt.Println(s.serverAddr)
     conn, err := lspnet.ListenUDP("udp", s.serverAddr)
     if err != nil {
+        fmt.Println("server: error")
         return nil, err
     }
     s.serverConn=conn
@@ -126,6 +129,7 @@ func (s *server) Write(connID int, payload []byte) error {
         connID:connID,
         payload:payload,
     }
+    fmt.Println("server: before send write request")
     s.writeRequestChan <- request
     err := <- s.writeBackChan
     return err
@@ -180,13 +184,14 @@ func (s *server) mainRoutine() {
                     writeSeqNum: 1,
                     connID: s.curClientConnID,
                     messageToPush: nil,
-                    pendingMessages: make([]*Message, 5),
+                    pendingMessages: make([]*Message, 0),
                     appendChan: make(chan *Message),
                     stagePushChan: make(chan *Message),
                     clientCloseChan: make(chan int),
                 }
                 s.curClientConnID += 1;
                 s.connectedClients = append(s.connectedClients, c)
+                // fmt.Printf("%v", s.connectedClients)
                 s.newClientChan <- c//let read routine create ack request
                 go c.clientMain(s)
             }
@@ -236,9 +241,13 @@ func (s *server) mainRoutine() {
     }
 }
 func (s *server) searchClient(addr *lspnet.UDPAddr) *s_client {
+    fmt.Println("server: entered search")
     for i := 0; i < len(s.connectedClients); i++ {
+        fmt.Println("server: entered search loop")
         sClient :=  s.connectedClients[i]
+        // fmt.Println("server: client not nil")
         if (strings.Compare(sClient.addr.String(),addr.String())==0) {
+            fmt.Println("server: this is client")
             return sClient
         }
     }
@@ -252,12 +261,16 @@ func (s *server) readRoutine() {
         default:
             serverConn := s.serverConn
             var b []byte
+            fmt.Println("server: before read")
             size,addr,err := serverConn.ReadFromUDP(b)
+            fmt.Println("server: got message")
             _ = size
-            if err != nil {//deal with error later
+            if err == nil {//deal with error later
                 message := &Message{} //store message
                 unmarshal(b,message)//unMarshall returns *Message
-                if integrityCheck(message){//check integrity here with checksum and size 
+                fmt.Println("server: after unmarshal")
+                if integrityCheck(message) {//check integrity here with checksum and size 
+                    fmt.Println("server: integrity check passed")
                     if (message.Type == MsgData){
                         sClient := s.searchClient(addr)//make sure client connected
                         seq := message.SeqNum
@@ -272,6 +285,7 @@ func (s *server) readRoutine() {
 
                             //else if seq <seqExpected, then don't worry about returning it to Read()
                             ack := NewAck(message.ConnID, message.SeqNum)
+                            fmt.Println("server:ack made")
                             ackRequest := &writeAckRequest{
                                 ack: ack,
                                 client: sClient,
@@ -283,6 +297,7 @@ func (s *server) readRoutine() {
                             message,
                             addr,
                         }
+                        fmt.Println("server: before searchClient")
                         //check if the client is already connected on the server end
                         newClient :=s.searchClient(addr)
                         var sClient *s_client = nil
