@@ -244,7 +244,8 @@ func (s *server) mainRoutine() {
 
             unmarshal(byteMessage,message1)//unMarshall returns *Message
             fmt.Println("server sends this type of message out:" + strconv.Itoa(int(message1.Type)))
-            fmt.Println("server: sending the ack with Type" + strconv.Itoa(int(ack.Type)))
+            fmt.Println("server: sending the ack with connID" + strconv.Itoa(int(message1.ConnID)))
+            fmt.Println(byteMessage)
             num, err := s.serverConn.WriteToUDP(byteMessage, sClient.addr)
             fmt.Println("server: finished sending ack")
             _ = num
@@ -272,15 +273,16 @@ func (s *server) readRoutine() {
             return
         default:
             serverConn := s.serverConn
-            var b []byte
+            b := make([]byte,2000)
             //fmt.Println("server: before read")
-            size,addr,err := serverConn.ReadFromUDP(b)
-            //fmt.Println("server: got message")
-            _ = size
-            if err == nil {//deal with error later
-                message := Message{} //store message
 
-                unmarshal(b,&message)//unMarshall returns *Message
+            size,addr,err := serverConn.ReadFromUDP(b)
+
+            //fmt.Println("server: got message")
+            if err == nil {//deal with error later
+                var message Message //store message
+
+                unmarshal(b[:size],&message)//unMarshall returns *Message
                 fmt.Println("server gets this type of message:" + strconv.Itoa(int(message.Type)))
                 //fmt.Println("server: after unmarshal")
                 if integrityCheck(&message) {//check integrity here with checksum and size 

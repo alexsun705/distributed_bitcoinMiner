@@ -277,15 +277,16 @@ func (c *client) readRoutine() {
         case <- c.readCloseChan:
             return
         default:
-            var b []byte
+            b := make([]byte,2000)
             n,err := c.clientConn.Read(b)
-            fmt.Println("client: got message")
-            _ = n
+            
+            //fmt.Println(b)
+            //_ = m
             if err == nil {//deal with error later
-                message := Message{}
+                var message Message
                 fmt.Println("client: before unmarshal")
-                fmt.Println(b)
-                unmarshal(b, &message)//unMarshall returns *Message
+                //fmt.Println(b)
+                unmarshal(b[:n], &message)//unMarshall returns *Message
                 fmt.Println("client: after unmarshal, integrity checks now")
                 if integrityCheck(&message){//check integrity here with checksum and size 
                     fmt.Println("client: passs integrity check")
