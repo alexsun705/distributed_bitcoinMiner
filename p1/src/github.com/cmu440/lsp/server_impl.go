@@ -32,11 +32,7 @@ type s_client struct { //server side client structure
 	//no corrupted messages as well
 	pendingMessages []*Message
 
-	appendChan chan *Message //signal clientMain append to pendingMessages
-
-	//signal clientMain to stage the push message, so clientMain can try to push
-	//message to server.readReturnChan in future looping
-	stagePushChan   chan *Message
+	messageChan     chan *Message //receive message from readRoutine
 	clientCloseChan chan int
 }
 
@@ -183,8 +179,7 @@ func (s *server) mainRoutine() {
 					connID:          s.curClientConnID,
 					messageToPush:   nil,
 					pendingMessages: make([]*Message, 0),
-					appendChan:      make(chan *Message),
-					stagePushChan:   make(chan *Message),
+					messageChan:     make(chan *Message),
 					clientCloseChan: make(chan int),
 				}
 				s.curClientConnID += 1
@@ -283,16 +278,8 @@ func (s *server) readRoutine() {
 					//fmt.Println("server: integrity check passed")
 					if message.Type == MsgData {
 						sClient := s.searchClient(addr) //make sure client connected
-						seq := message.SeqNum
 						if sClient != nil {
-							if seq > sClient.seqExpected { //out of order, pending
-								sClient.appendChan <- &message
-							}
-							if seq == sClient.seqExpected {
-								//let clientMain try pushing message to s.readReturnChan
-								sClient.stagePushChan <- &message
-							}
-
+							sClient.messageChan <- &message
 							//else if seq <seqExpected, then don't worry about returning it to Read()
 							ack := NewAck(message.ConnID, message.SeqNum)
 							// fmt.Println("server: ack made")
@@ -365,14 +352,12 @@ func (sClient *s_client) clientMain(s *server) {
 			select {
 			case <-sClient.clientCloseChan: //CloseConn or Close called
 				return
-			case message := <-sClient.appendChan: // append out of order message
-				if !sClient.alreadyReceived(message.SeqNum) {
-					sClient.pendingMessages = append(sClient.pendingMessages, message)
-				}
-			case message := <-sClient.stagePushChan: //
-				// fmt.Println("server: has entered stage push")
-				if message.SeqNum == sClient.seqExpected {
-					// fmt.Println("server: has loaded to messageToPush")
+			case message := <-sClient.messageChan:
+				if message.SeqNum > sClient.seqExpected {
+					if !sClient.alreadyReceived(message.SeqNum) {
+						sClient.pendingMessages = append(sClient.pendingMessages, message)
+					}
+				} else if message.SeqNum == sClient.seqExpected {
 					wrapMessage := &readReturn{
 						connID:  message.ConnID,
 						seqNum:  message.SeqNum,
@@ -411,14 +396,12 @@ func (sClient *s_client) clientMain(s *server) {
 			select {
 			case <-sClient.clientCloseChan: //CloseConn or Close called
 				return
-			case message := <-sClient.appendChan: // append out of order message
-				if !sClient.alreadyReceived(message.SeqNum) {
-					sClient.pendingMessages = append(sClient.pendingMessages, message)
-				}
-			case message := <-sClient.stagePushChan: //
-				// fmt.Println("server: has entered stage push")
-				if message.SeqNum == sClient.seqExpected {
-					// fmt.Println("server: has loaded to messageToPush")
+			case message := <-sClient.messageChan:
+				if message.SeqNum > sClient.seqExpected {
+					if !sClient.alreadyReceived(message.SeqNum) {
+						sClient.pendingMessages = append(sClient.pendingMessages, message)
+					}
+				} else if message.SeqNum == sClient.seqExpected {
 					wrapMessage := &readReturn{
 						connID:  message.ConnID,
 						seqNum:  message.SeqNum,
