@@ -21,6 +21,7 @@ type connectRequest struct {
 	message *Message
 	addr    *lspnet.UDPAddr
 }
+
 type s_client struct { //server side client structure
 	addr          *lspnet.UDPAddr
 	seqExpected   int //start with one
@@ -31,14 +32,27 @@ type s_client struct { //server side client structure
 	// seq number of messages in pendingMessages >= seqExpected
 	//no corrupted messages as well
 	pendingMessages []*Message
-
 	messageChan     chan *Message //receive message from readRoutine
 	clientCloseChan chan int
+
+	// this is for the rest of partA
+	window [] *windowElem
+	windowStart int
+	addToWindowChan chan *windowElem
+	buffer [] *windowElem
 }
 
 type writeAckRequest struct {
 	ack    *Message
 	client *s_client
+}
+
+type windowElem struct {
+	seqNum int
+	ackChan chan *Message
+	msg []byte
+	finishedSetInWindowChan chan int // the chan tells the client main that 
+									 // the elem has been put in window
 }
 
 type writeRequest struct {
@@ -67,6 +81,9 @@ type server struct {
 	clientRemoveChan chan *s_client
 	mainCloseChan    chan int
 	readCloseChan    chan int
+
+	// below is for the rest of partA
+	clientWriteErrorChan chan error
 }
 
 // NewServer creates, initiates, and returns a new server. This function should
@@ -181,6 +198,9 @@ func (s *server) mainRoutine() {
 					pendingMessages: make([]*Message, 0),
 					messageChan:     make(chan *Message),
 					clientCloseChan: make(chan int),
+
+					window: make([]*windowElem, DefaultWindowSize)
+					windowStart: 1
 				}
 				s.curClientConnID += 1
 				s.connectedClients = append(s.connectedClients, c)
@@ -208,16 +228,26 @@ func (s *server) mainRoutine() {
 				checksum := makeCheckSum(connID, seqNum, size, payload)
 				original := NewData(connID, seqNum, size, payload, checksum)
 				msg, err := marshal(original)
-				if err != nil {
-					s.writeBackChan <- err
-					continue
+
+				elem = &windowElem{
+					seqNum: seqNum,
+					ackChan: make(chan *Message),
+					msg: msg, 
 				}
-				num, err := s.serverConn.WriteToUDP(msg, sClient.addr)
-				_ = num
-				if err == nil {
-					sClient.writeSeqNum += 1
-				}
+				sClient.addToWindowChan <- elem
+				// ********** go resendRoutine // the first time sending is also done in resendRoutine
+				// if err != nil {
+				// 	s.writeBackChan <- err
+				// 	continue
+				// }
+				// num, err := s.serverConn.WriteToUDP(msg, sClient.addr)
+				// _ = num
+				// if err == nil {
+				// 	sClient.writeSeqNum += 1
+				// }
+				err := <- clientWriteErrorChan
 				s.writeBackChan <- err
+
 			} else {
 				err := errors.New("This client does not exist")
 				s.writeBackChan <- err
@@ -391,7 +421,50 @@ func (sClient *s_client) clientMain(s *server) {
 						break //make sure only push one message to the read()
 					}
 				}
+			// below two cases are for partA
+			// to avoid bug, the two cases are not copied in the else clause
+			case elem := <- sClient.addToWindowChan:
+				seqNum = elem.seqNum 
+				// the below condition is ** key ** 
+				if (seqNum < sClient.windowStart + DefaultWindowSize && sClient.window[seqNum - windowStart] == nil){
+					// can be put into the window
+					sClient.window[seqNum - windowStart] = elem
+					******* go resendRoutine // NOTE: the first time sending is also done in resendRoutine
+				} else {
+					append(sClient.buffer, elem)
+				}
+
+			case index := <- sClient.resendSuccessChan:
+				sClient.window[index] = nil
+				window := sClient.window
+				if index == 0{
+					offset := 0
+					for int i = 0; i < DefaultWindowSize; i ++ {
+						if window[i] == nil{
+							offset += 1
+						} else {
+							break
+						}
+					}
+					// for cleaniness and garbage recollection purpose, remake 
+					// the window every time we slide the window
+					new_window := make([] *windowElem, DefaultWindowSize)
+					for i := offset; i < DefaultWindowSize; i++{
+						new_window[i - offset] = window[i]
+					}
+					// add element in the buffer to the window
+					emptyStartIndex := DefaultWindowSize - offset
+					for i := 0; i < offset; i ++ {
+						new_window[i + emptyStartIndex] = buffer[i]
+					}
+					// shrink the buffer
+					new_buffer := buffer[offset:]
+					sClient.windowStart += offset
+					sClient.window = new_window
+					sClient.buffer = new_buffer
+				}
 			}
+
 		} else {
 			select {
 			case <-sClient.clientCloseChan: //CloseConn or Close called
@@ -410,6 +483,7 @@ func (sClient *s_client) clientMain(s *server) {
 					}
 					sClient.messageToPush = wrapMessage
 				}
+			}
 			}
 		}
 	}

@@ -40,6 +40,12 @@ type client struct {
 	closeChan         chan int
 	mainCloseChan     chan int
 	readCloseChan     chan int
+
+	// below is for partA
+	window [] *windowElem // the window that contains all the elements that are trying to resend
+    windowStart int
+    addToWindowChan chan *windowElem
+    resendSuccessChan chan int // index := <- chan, which index from the window start has succeeded
 }
 
 // NewClient creates, initiates, and returns a new client. This function
@@ -73,7 +79,7 @@ func NewClient(hostport string, params *Params) (Client, error) {
 		appendChan:        make(chan *Message),
 		stagePushChan:     make(chan *Message),
 		readReturnChan:    make(chan *readReturn), //channel to send message to Read() back
-		pendingMessages:   make([]*Message, 5),
+		pendingMessages:   make([]*Message, 0),
 		writeChan:         make(chan []byte),
 		writeBackChan:     make(chan error),
 		readChan:          make(chan int),
@@ -85,6 +91,7 @@ func NewClient(hostport string, params *Params) (Client, error) {
 		connIDReturnChan:  make(chan int),
 		mainCloseChan:     make(chan int),
 		readCloseChan:     make(chan int),
+
 	}
 
 	go c.mainRoutine()
@@ -207,12 +214,63 @@ func (c *client) mainRoutine() {
 			select {
 			case <-c.mainCloseChan:
 				return
+
 			//write channels
 			case payload := <-c.writeChan:
 				checksum := makeCheckSum(c.connID, c.curSeqNum, len(payload), payload)
-				originalMsg := NewData(c.connID, c.curSeqNum, len(payload), payload, checksum)
-				c.sendMessage(originalMsg)
+				original := NewData(c.connID, c.curSeqNum, len(payload), payload, checksum)
+				msg, err := marshal(original)
+				elem = &windowElem{
+					seqNum: seqNum,
+					ackChan: make(chan *Message),
+					msg: msg, 
+				}
+				c.addToWindowChan <- elem
+				// c.sendMessage(originalMsg)
 				c.curSeqNum += 1
+
+			// below two cases are for partA
+			// to avoid bug, the two cases are not copied in the else clause
+			case elem := <- c.addToWindowChan:
+				seqNum = elem.seqNum
+				// the below condition is ** key ** 
+				if (seqNum < c.windowStart + DefaultWindowSize && c.window[seqNum - windowStart] == nil){
+					// can be put into the window
+					c.window[seqNum - windowStart] = elem
+					******* go resendRoutine // NOTE: the first time sending is also done in resendRoutine
+				} else {
+					append(c.buffer, elem)
+				}
+
+			case index := <- c.resendSuccessChan:
+				c.window[index] = nil
+				window := c.window
+				if index == 0{
+					offset := 0
+					for int i = 0; i < DefaultWindowSize; i ++ {
+						if window[i] == nil{
+							offset += 1
+						} else {
+							break
+						}
+					}
+					// for cleaniness and garbage recollection purpose, remake 
+					// the window every time we slide the window
+					new_window := make([] *windowElem, DefaultWindowSize)
+					for i := offset; i < DefaultWindowSize; i++{
+						new_window[i - offset] = window[i]
+					}
+					// add element in the buffer to the window
+					emptyStartIndex := DefaultWindowSize - offset
+					for i := 0; i < offset; i ++ {
+						new_window[i + emptyStartIndex] = buffer[i]
+					}
+					// shrink the buffer
+					new_buffer := buffer[offset:]
+					c.windowStart += offset
+					c.window = new_window
+					c.buffer = new_buffer
+				}
 
 			case seqNum := <-c.writeAckChan:
 				ack := NewAck(c.connID, seqNum)
