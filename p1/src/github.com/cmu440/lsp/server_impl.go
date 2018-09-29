@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 )
 
 type readReturn struct {
@@ -21,6 +22,7 @@ type connectRequest struct {
 	message *Message
 	addr    *lspnet.UDPAddr
 }
+
 type s_client struct { //server side client structure
 	addr          *lspnet.UDPAddr
 	seqExpected   int //start with one
@@ -31,14 +33,27 @@ type s_client struct { //server side client structure
 	// seq number of messages in pendingMessages >= seqExpected
 	//no corrupted messages as well
 	pendingMessages []*Message
-
 	messageChan     chan *Message //receive message from readRoutine
 	clientCloseChan chan int
+
+	// this is for the rest of partA
+	window [] *windowElem
+	windowStart int
+	addToWindowChan chan *windowElem
+	buffer [] *windowElem
+	connDropChan chan int //notify clientMain that connection dropped
+	gotMessageChan chan int//notify clientTime that got message from this client
 }
 
 type writeAckRequest struct {
 	ack    *Message
 	client *s_client
+}
+
+type windowElem struct {
+	seqNum int
+	ackChan chan int
+	msg []byte
 }
 
 type writeRequest struct {
@@ -64,9 +79,13 @@ type server struct {
 	writeAckChan     chan *writeAckRequest
 	writeBackChan    chan error
 
-	clientRemoveChan chan *s_client
+	clientRemoveChan chan int //client  dropped
 	mainCloseChan    chan int
 	readCloseChan    chan int
+
+	// below is for the rest of partA
+	clientWriteErrorChan chan error
+	
 }
 
 // NewServer creates, initiates, and returns a new server. This function should
@@ -92,8 +111,9 @@ func NewServer(port int, params *Params) (Server, error) {
 		clientRemoveChan: make(chan *s_client),
 		mainCloseChan:    make(chan int),
 		readCloseChan:    make(chan int),
+		clientDroppedChan: make (chan int),
 	}
-	adr, err := lspnet.ResolveUDPAddr("udp", "127.0.0.1:"+strconv.Itoa(port))
+	adr, err := lspnet.ResolveUDPAddr("udp", "localhost:"+strconv.Itoa(port))
 	if err != nil {
 		return nil, err
 	}
@@ -161,9 +181,9 @@ func (s *server) mainRoutine() {
 				s.connectedClients[i].clientCloseChan <- 1
 			}
 			return
-		case sClient := <-s.clientRemoveChan:
+		case connID := <-s.clientRemoveChan:
 			for i := 0; i < len(s.connectedClients); i++ {
-				if s.connectedClients[i].connID == sClient.connID {
+				if s.connectedClients[i].connID == connID {
 					s.connectedClients = append(s.connectedClients[:i], s.connectedClients[i+1:]...)
 					break
 				}
@@ -181,6 +201,10 @@ func (s *server) mainRoutine() {
 					pendingMessages: make([]*Message, 0),
 					messageChan:     make(chan *Message),
 					clientCloseChan: make(chan int),
+					window: make([]*windowElem, DefaultWindowSize),
+					windowStart: 1,
+					connDropChan make(chan int), //notify clientMain that connection dropped
+					gotMessageChan make(chan int),
 				}
 				s.curClientConnID += 1
 				s.connectedClients = append(s.connectedClients, c)
@@ -189,9 +213,10 @@ func (s *server) mainRoutine() {
 				s.newClientChan <- c //let read routine create ack request
 				//fmt.Println("server: start client Main routine")
 				go c.clientMain(s)
+				go c.clientTime(s)
 			}
 
-		case request := <-s.writeRequestChan: //respond to Write() application
+		case request := <-s.writeRequestChan: //deal with Write() request, don't actually send to clients
 			// write data to client
 			connID := request.connID
 			payload := request.payload
@@ -204,6 +229,7 @@ func (s *server) mainRoutine() {
 			}
 			if sClient != nil {
 				seqNum := sClient.writeSeqNum
+				sClient.writeSeqNum += 1
 				size := len(payload)
 				checksum := makeCheckSum(connID, seqNum, size, payload)
 				original := NewData(connID, seqNum, size, payload, checksum)
@@ -212,19 +238,32 @@ func (s *server) mainRoutine() {
 					s.writeBackChan <- err
 					continue
 				}
-				num, err := s.serverConn.WriteToUDP(msg, sClient.addr)
-				_ = num
-				if err == nil {
-					sClient.writeSeqNum += 1
+
+				elem = &windowElem{
+					seqNum: seqNum,
+					ackChan: make(chan int),
+					msg: msg, 
 				}
+				sClient.addToWindowChan <- elem
+				// ********** go resendRoutine // the first time sending is also done in resendRoutine
+				// if err != nil {
+				// 	s.writeBackChan <- err
+				// 	continue
+				// }
+				// num, err := s.serverConn.WriteToUDP(msg, sClient.addr)
+				// _ = num
+				// if err == nil {
+				// 	sClient.writeSeqNum += 1
+				// }
+				err := <- sClient.clientWriteErrorChan
 				s.writeBackChan <- err
+
 			} else {
-				err := errors.New("This client does not exist")
+				err := errors.New("This client dropped")
 				s.writeBackChan <- err
 			}
 
 		// write ack to client
-
 		case ackRequest := <-s.writeAckChan:
 			// fmt.Println("server: got ack sending request")
 			ack := ackRequest.ack
@@ -260,7 +299,7 @@ func (s *server) searchClient(addr *lspnet.UDPAddr) *s_client {
 func (s *server) readRoutine() {
 	for {
 		select {
-		case <-s.readCloseChan:
+		case <-s.readCloseChan://do later
 			return
 		default:
 			serverConn := s.serverConn
@@ -277,6 +316,11 @@ func (s *server) readRoutine() {
 				//fmt.Println("server: after unmarshal")
 				if integrityCheck(&message) { //check integrity here with checksum and size
 					//fmt.Println("server: integrity check passed")
+					//notify c.clientTime that got some message from this client
+					c := s.searchClient(addr)
+					if (c!=nil){
+						c.gotMessageChan <- 1
+					}
 					if message.Type == MsgData {
 						sClient := s.searchClient(addr) //make sure client connected
 						if sClient != nil {
@@ -290,7 +334,7 @@ func (s *server) readRoutine() {
 							}
 							s.writeAckChan <- ackRequest
 						}
-					} else if message.Type == MsgConnect {
+					} else if (message.Type == MsgConnect) {
 						request := &connectRequest{
 							&message,
 							addr,
@@ -319,6 +363,12 @@ func (s *server) readRoutine() {
 						// fmt.Println("server: send ackRequest to mainRoutine")
 						s.writeAckChan <- ackRequest
 						//if its ACK, do sth later for epoch
+					} else if (message.Type== MsgAck) {
+						sClient := s.searchClient(addr)
+
+						if (sClient!=nil){
+							sClient.resendSuccessChan <- message.SeqNum
+						}
 					}
 
 				}
@@ -334,6 +384,54 @@ func (c *s_client) alreadyReceived(seq int) bool {
 		}
 	}
 	return false
+}
+func min(x, y int) int {
+	if (x < y){
+		return x
+	}
+	return y
+	
+}
+func (sClient *s_client) resendRoutine(elem *windowElem, s *server) {
+	//wrtie to client, potentially sending message to server's main routine to handle
+	num, err := s.serverConn.WriteToUDP(elem.msg, sClient.addr)
+	sClient.clientWriteErrorChan <- err
+	_ = num
+	dur := 1
+	timer := time.NewTimer(time.Duration(dur * s.params.EpochMillis) * time.Millisecond)
+
+	for {
+		select{
+		case <- timer.C://resend
+			s.serverConn.WriteToUDP(elem.msg, sClient.addr)
+			dur = min(dur*2,s.params.MaxBackOffInterval)
+			timer = time.NewTimer(dur)
+		case <- elem.ackChan:
+			return
+		}
+	}
+}
+func (sClient *s_client) clientTime(s *server) {
+	epoch := s.params.EpochMillis
+	epochLimit := s.params.EpochLimit
+	reminderTimer := time.NewTimer(time.Duration(epoch)*time.Millisecond)
+	connDropTimer := time.NewTimer(time.Duration(epoch*epochLimit)*time.Millisecond)
+	ack := NewAck(sClient.connID, 0) //reminder ack
+	msg, err := marshal(ack) //message to be sent to client
+	_ = err
+	for {
+		select{
+		case <- reminderTimer.C://haven't received anything from this client for a epoch 
+			s.serverConn.WriteToUDP(msg, sClient.addr)
+			reminderTimer := time.NewTimer(time.Duration(epoch)*time.Millisecond)
+		case <- connDropTimer.C://connection dropped
+			sClient.connDropChan <- 1
+			return
+		case <- sClient.gotMessageChan://got sth, reset timmer
+			reminderTimer := time.NewTimer(time.Duration(epoch)*time.Millisecond)
+			connDropTimer := time.NewTimer(time.Duration(epoch*epochLimit)*time.Millisecond)
+		}
+	}
 }
 
 //would block until Read() is called
@@ -392,7 +490,11 @@ func (sClient *s_client) clientMain(s *server) {
 						break //make sure only push one message to the read()
 					}
 				}
-			}
+			// below two cases are for partA
+				///////////////////////////////////////////////////////////////
+				//NEED TO COPY THE PART FROM BELOW TO HERE!//////////////////
+				///*******************************/////////////////////////////
+
 		} else {
 			select {
 			case <-sClient.clientCloseChan: //CloseConn or Close called
@@ -411,6 +513,70 @@ func (sClient *s_client) clientMain(s *server) {
 					}
 					sClient.messageToPush = wrapMessage
 				}
+						// below two cases are for partA
+			// to avoid bug, the two cases are not copied in the else clause
+			case elem := <- sClient.addToWindowChan:
+
+				seqNum = elem.seqNum 
+				// the below condition is ** key **
+				if (seqNum < sClient.windowStart + s.params.DefaultWindowSize && sClient.window[seqNum - sClient.windowStart] == nil){
+					// can be put into the window
+					sClient.window[seqNum - windowStart] = elem
+					go sClient.resendRoutine(elem,s) // NOTE: the first time sending is also done in resendRoutine
+				} else {
+					sClient.buffer = append(sClient.buffer, elem)
+					sClient.clientWriteErrorChan <- nil
+				}
+
+			case seqNum := <- sClient.resendSuccessChan:
+				index := seqNum - sClient.windowStart
+				sClient.window[index].ackChan <-1 //let resendRoutine for this message stop
+				sClient.window[index] = nil
+				window := sClient.window
+				if index == 0{//need to update windowStart
+					offset := 0
+					for int i = 0; i < DefaultWindowSize; i ++ {
+						if window[i] == nil{
+							offset += 1
+						} else {
+							break
+						}
+					}
+					// for cleaniness and garbage recollection purpose, remake 
+					// the window every time we slide the window
+					new_window := make([] *windowElem, DefaultWindowSize)
+					for i := offset; i < DefaultWindowSize; i++{
+						new_window[i - offset] = window[i]
+					}
+					
+					// add element in the buffer to the window
+					emptyStartIndex := DefaultWindowSize - offset
+					for i := 0; i < offset; i ++ {
+						new_window[i + emptyStartIndex] = buffer[i]
+						go sClient.resendRoutine(buffer[i], s)
+					}
+					// shrink the buffer
+					new_buffer := buffer[offset:]
+					sClient.windowStart += offset
+					sClient.window = new_window
+					sClient.buffer = new_buffer
+				}
+			case <- sClient.connDropChan: //conneciton dropped
+				for int i = 0; i < DefaultWindowSize; i ++ {
+						if sClient.window[i] != nil{
+							sClient.window[i].ackChan <- 1 //stop the resend routine
+
+						} 
+					}
+				s.clientRemoveChan <- sClient.connID//let server know it's dropped
+				droppedMsg := &readReturn{
+					connID: sClient.connID,
+					seqNum: 0,
+					payload: make([]byte,0),
+					err: errors.New("This client disconnected")
+				}
+				s.readReturnChan <- droppedMsg
+				return //end clientMainRoutine
 			}
 		}
 	}
