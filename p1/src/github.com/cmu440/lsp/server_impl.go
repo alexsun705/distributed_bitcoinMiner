@@ -93,7 +93,7 @@ func NewServer(port int, params *Params) (Server, error) {
 		mainCloseChan:    make(chan int),
 		readCloseChan:    make(chan int),
 	}
-	adr, err := lspnet.ResolveUDPAddr("udp", "localhost:"+strconv.Itoa(port))
+	adr, err := lspnet.ResolveUDPAddr("udp", "127.0.0.1:"+strconv.Itoa(port))
 	if err != nil {
 		return nil, err
 	}
@@ -191,7 +191,7 @@ func (s *server) mainRoutine() {
 				go c.clientMain(s)
 			}
 
-		case request := <-s.writeRequestChan:
+		case request := <-s.writeRequestChan: //respond to Write() application
 			// write data to client
 			connID := request.connID
 			payload := request.payload
@@ -224,6 +224,7 @@ func (s *server) mainRoutine() {
 			}
 
 		// write ack to client
+
 		case ackRequest := <-s.writeAckChan:
 			// fmt.Println("server: got ack sending request")
 			ack := ackRequest.ack

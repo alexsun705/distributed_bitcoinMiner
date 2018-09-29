@@ -73,7 +73,7 @@ func NewClient(hostport string, params *Params) (Client, error) {
 		appendChan:        make(chan *Message),
 		stagePushChan:     make(chan *Message),
 		readReturnChan:    make(chan *readReturn), //channel to send message to Read() back
-		pendingMessages:   make([]*Message, 5),
+		pendingMessages:   make([]*Message,0),
 		writeChan:         make(chan []byte),
 		writeBackChan:     make(chan error),
 		readChan:          make(chan int),
@@ -250,7 +250,7 @@ func (c *client) mainRoutine() {
 				//message in order, check againt client.seqExpected
 				for i := 0; i < len(c.pendingMessages); i++ {
 					message := c.pendingMessages[i]
-					if message != nil && message.SeqNum == c.seqExpected {
+					if  message.SeqNum == c.seqExpected {
 						//make sure sending messages out in order
 						wrapMessage := &readReturn{
 							connID:  message.ConnID,
