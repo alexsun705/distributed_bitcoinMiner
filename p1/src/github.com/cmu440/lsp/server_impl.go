@@ -79,6 +79,9 @@ type server struct {
 	writeRequestChan chan *writeRequest
 	writeAckChan     chan *writeAckRequest
 	writeBackChan    chan error
+	searchClientRequestChan chan *lspnet.UDPAddr
+	searchClientReturnChan chan *s_client
+	searchClientCloseChan chan int
 
 	clientRemoveChan chan int //client  dropped
 	mainCloseChan    chan int
@@ -112,6 +115,9 @@ func NewServer(port int, params *Params) (Server, error) {
 		clientRemoveChan: make(chan int),
 		mainCloseChan:    make(chan int),
 		readCloseChan:    make(chan int),
+		searchClientCloseChan: make(chan int),
+		searchClientRequestChan: make(chan *lspnet.UDPAddr),
+		searchClientReturnChan: make(chan *s_client),
 	}
 	adr, err := lspnet.ResolveUDPAddr("udp", "127.0.0.1:"+strconv.Itoa(port))
 	if err != nil {
@@ -150,8 +156,8 @@ func (s *server) Write(connID int, payload []byte) error {
 }
 
 func (s *server) CloseConn(connID int) error {
-
-	sClient := s.searchClientToClose(connID)
+	s.searchClientCloseChan <- connID
+	sClient := <- s.searchClientReturnChan
 	if sClient != nil {
 		sClient.clientCloseChan <- 1
 		s.clientRemoveChan <- sClient.connID //could have issues, if removing client
@@ -165,15 +171,8 @@ func (s *server) Close() error {
 	s.readCloseChan <- 1
 	return nil
 }
-func (s *server) searchClientToClose(connID int) *s_client {
-	for i := 0; i < len(s.connectedClients); i++ {
-		sClient := s.connectedClients[i]
-		if sClient.connID == connID {
-			return sClient
-		}
-	}
-	return nil
-}
+
+
 func (s *server) mainRoutine() {
 	for {
 		select {
@@ -182,6 +181,12 @@ func (s *server) mainRoutine() {
 				s.connectedClients[i].clientCloseChan <- 1
 			}
 			return
+		case connID := <- s.searchClientCloseChan:
+			sClient := s.searchClientToClose(connID)
+			s.searchClientReturnChan <- sClient
+		case addr := <- s.searchClientRequestChan:
+			c := s.searchClient(addr)
+			s.searchClientReturnChan <- c
 		case connID := <-s.clientRemoveChan:
 			for i := 0; i < len(s.connectedClients); i++ {
 				if s.connectedClients[i].connID == connID {
@@ -260,6 +265,16 @@ func (s *server) mainRoutine() {
 		}
 	}
 }
+func (s *server) searchClientToClose(connID int) *s_client {
+	for i := 0; i < len(s.connectedClients); i++ {
+		sClient := s.connectedClients[i]
+		if sClient.connID == connID {
+			return sClient
+		}
+	}
+	return nil
+}
+
 func (s *server) searchClient(addr *lspnet.UDPAddr) *s_client {
 	// fmt.Println("server: entered search")
 	for i := 0; i < len(s.connectedClients); i++ {
@@ -295,7 +310,9 @@ func (s *server) readRoutine() {
 					//fmt.Println("server: integrity check passed")
 					
 					//notify c.clientTime that got some message from this client
-					sClient := s.searchClient(addr)
+					s.searchClientRequestChan <- addr
+
+					sClient := <- s.searchClientReturnChan
 					if (sClient!=nil){
 						sClient.gotMessageChan <- 1
 

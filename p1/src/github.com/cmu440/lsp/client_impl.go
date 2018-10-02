@@ -41,7 +41,7 @@ type client struct {
 	closeChan         chan int
 	mainCloseChan     chan int
 	readCloseChan     chan int
-
+	timeCloseChan 	  chan int
 	// below is for partA
 	connDropped bool
 	window [] *windowElem // the window that contains all the elements that are trying to resend
@@ -98,6 +98,7 @@ func NewClient(hostport string, params *Params) (Client, error) {
 		connIDReturnChan:  make(chan int),
 		mainCloseChan:     make(chan int),
 		readCloseChan:     make(chan int),
+		timeCloseChan: 	   make(chan int),
 		connDropped: false,
 		window: make([] *windowElem, params.WindowSize),// the window that contains all the elements that are trying to resend
     	windowStart: 1,
@@ -161,6 +162,7 @@ func (c *client) Write(payload []byte) error {
 func (c *client) Close() error {
 	c.mainCloseChan <- 1
 	c.readCloseChan <- 1
+	c.timeCloseChan <- 1
 	return nil
 }
 
@@ -274,6 +276,8 @@ func (c *client) timeRoutine() {
 		case <- c.gotMessageChan://got sth, reset timmer
 			reminderTimer = time.NewTimer(time.Duration(epoch)*time.Millisecond)
 			connDropTimer = time.NewTimer(time.Duration(epoch*epochLimit)*time.Millisecond)
+		case <- c.timeCloseChan:
+			return
 		}
 	}
 }
@@ -302,6 +306,11 @@ func (c *client) mainRoutine() {
 		}
 		select {
 			case <-c.mainCloseChan:
+				for i := 0; i < c.params.WindowSize; i ++ {
+						if c.window[i] != nil{
+							c.window[i].ackChan <- 1 //stop the resend routine for each message
+						} 
+					}
 				return
 
 			case <- c.connDropChan: //conneciton dropped
