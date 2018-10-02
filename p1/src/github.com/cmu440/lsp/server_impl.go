@@ -433,8 +433,14 @@ func (sClient *s_client) clientMain(s *server) {
 		//     readReturnChan := s.readReturnChan
 		//     _ = readReturnChan
 		// }
+		var readReturnChan chan *readReturn
+		readReturnChan = nil
+		
 		if sClient.messageToPush != nil && sClient.messageToPush.seqNum == sClient.seqExpected {
-			select {
+			readReturnChan = s.readReturnChan
+		}
+
+		select {
 			case <-sClient.clientCloseChan: //CloseConn or Close called
 				return
 			case message := <-sClient.messageChan:
@@ -451,7 +457,7 @@ func (sClient *s_client) clientMain(s *server) {
 					}
 					sClient.messageToPush = wrapMessage
 				}
-			case s.readReturnChan <- sClient.messageToPush:
+			case readReturnChan <- sClient.messageToPush:
 				//if entered here, means we just pushed the message with seqNum
 				//client.seqExpected to the main readReturnChan, thus need to update
 				//and check whether we have pendingMessages that can be
@@ -568,119 +574,6 @@ func (sClient *s_client) clientMain(s *server) {
 				}
 				s.readReturnChan <- droppedMsg
 				return //end clientMainRoutine
-			}
-		} else {
-			select {
-			case <-sClient.clientCloseChan: //CloseConn or Close called
-				return
-			case message := <-sClient.messageChan:
-				if message.SeqNum > sClient.seqExpected {
-					if !sClient.alreadyReceived(message.SeqNum) {
-						sClient.pendingMessages = append(sClient.pendingMessages, message)
-					}
-				} else if message.SeqNum == sClient.seqExpected {
-					wrapMessage := &readReturn{
-						connID:  message.ConnID,
-						seqNum:  message.SeqNum,
-						payload: message.Payload,
-						err:     nil,
-					}
-					sClient.messageToPush = wrapMessage
-				}
-						// below two cases are for partA
-			// to avoid bug, the two cases are not copied in the else clause
-			case payload := <- sClient.addToWindowChan:
-				seqNum := sClient.writeSeqNum
-				sClient.writeSeqNum += 1
-				size := len(payload)
-				checksum := makeCheckSum(sClient.connID, seqNum, size, payload)
-				original := NewData(sClient.connID, seqNum, size, payload, checksum)
-				msg, err := marshal(original)
-				if err != nil {
-					//don't do anything?
-					//s.writeBackChan <- err
-					continue
-				}
-
-				elem := &windowElem{
-					seqNum: seqNum,
-					ackChan: make(chan int),
-					msg: msg, 
-				}
-				// the below condition is ** key **
-				//fmt.Println("writing for seqNum message of: "+strconv.Itoa(seqNum)+ "for client"+strconv.Itoa(sClient.connID)+", with windowStart,windowSize being:" + strconv.Itoa(sClient.windowStart)+","+strconv.Itoa(len(sClient.window)))
-
-
-				if (seqNum < sClient.windowStart + s.params.WindowSize && sClient.window[seqNum - sClient.windowStart] == nil){
-					// can be put into the window
-					sClient.window[seqNum - sClient.windowStart] = elem
-					go sClient.resendRoutine(elem,s) // NOTE: the first time sending is also done in resendRoutine
-				} else {
-					sClient.writeBuffer = append(sClient.writeBuffer, elem)
-					
-				}
-				
-
-			case seqNum := <- sClient.resendSuccessChan:
-				if (seqNum < sClient.windowStart) {//if sth already passed
-					continue
-				}
-				index := seqNum - sClient.windowStart
-				sClient.window[index].ackChan <-1 //let resendRoutine for this message stop
-				sClient.window[index] = nil
-				window := sClient.window
-				if index == 0{//need to update windowStart
-					buffer := sClient.writeBuffer
-					offset := 0
-					for i := 0; i < s.params.WindowSize; i ++ {
-						if window[i] == nil{
-							offset += 1
-						} else {
-							break
-						}
-					}
-					//race condition of getting writeSeqNum
-					offset = min(sClient.writeSeqNum-sClient.windowStart,offset)
-					// for cleaniness and garbage recollection purpose, remake 
-					// the window every time we slide the window
-					windowSize := s.params.WindowSize
-					newWindow := make([] *windowElem, windowSize)
-					for i := offset; i < windowSize; i++{
-						newWindow[i - offset] = window[i]
-					}
-					
-					// add element in the buffer to the window
-					emptyStartIndex := windowSize - offset
-					bufferToCopy := min(len(sClient.writeBuffer),offset)
-					for i := 0; i < bufferToCopy; i ++ {
-						newWindow[i + emptyStartIndex] = buffer[i]
-						go sClient.resendRoutine(buffer[i], s)
-					}
-					// shrink the buffer
-					newBuffer := buffer[bufferToCopy:]
-					//change windowStart
-					sClient.windowStart += offset
-					//update window, buffer
-					sClient.window = newWindow
-					sClient.writeBuffer = newBuffer
-				}
-			case <- sClient.connDropChan: //conneciton dropped
-				for i := 0; i < s.params.WindowSize; i ++ {
-						if sClient.window[i] != nil{
-							sClient.window[i].ackChan <- 1 //stop the resend routine
-
-						} 
-					}
-				s.clientRemoveChan <- sClient.connID//let server know it's dropped
-				droppedMsg := &readReturn{
-					connID: sClient.connID,
-					seqNum: 0,
-					payload: nil,
-					err: errors.New("This client disconnected"),
-				}
-				s.readReturnChan <- droppedMsg
-				return //end clientMainRoutine
-			}
 		}
 	}
 }
