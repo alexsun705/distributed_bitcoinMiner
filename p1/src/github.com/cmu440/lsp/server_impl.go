@@ -302,7 +302,7 @@ func (s *server) readRoutine() {
 					}
 					//deal with differenet types of messages
 					if message.Type == MsgData {
-						fmt.Println("got data message from client" + strconv.Itoa(sClient.connID)+"\n")
+						//fmt.Println("got data message from client" + strconv.Itoa(sClient.connID)+"\n")
 						//sClient := s.searchClient(addr) //make sure client connected
 						if sClient != nil {
 							sClient.messageChan <- &message
@@ -370,15 +370,27 @@ func (c *s_client) alreadyReceived(seq int) bool {
 func (sClient *s_client) resendRoutine(elem *windowElem, s *server) {
 	//wrtie to client, potentially sending message to server's main routine to handle
 	s.serverConn.WriteToUDP(elem.msg, sClient.addr)
-	dur := 1
-	timer := time.NewTimer(time.Duration(dur * s.params.EpochMillis) * time.Millisecond)
+	maxBackOff := s.params.MaxBackOffInterval
+	curBackOff := 0
+	epochPassed := 0
+	timer := time.NewTimer(time.Duration(s.params.EpochMillis) * time.Millisecond)
 
 	for {
 		select{
 		case <- timer.C://resend
-			s.serverConn.WriteToUDP(elem.msg, sClient.addr)
-			dur = min(dur*2,s.params.MaxBackOffInterval)
-			timer = time.NewTimer(time.Duration(dur * s.params.EpochMillis) * time.Millisecond)
+			if (epochPassed >= curBackOff){
+				epochPassed = 0
+				s.serverConn.WriteToUDP(elem.msg, sClient.addr)
+				if (curBackOff ==0){
+					curBackOff = min(curBackOff+1,maxBackOff)
+				} else {
+					curBackOff = min(curBackOff*2,maxBackOff)
+				}
+			} else{
+				epochPassed += 1
+			}
+			
+			timer = time.NewTimer(time.Duration( s.params.EpochMillis) * time.Millisecond)
 		case <- elem.ackChan:
 			return
 		}
@@ -406,6 +418,7 @@ func (sClient *s_client) clientTime(s *server) {
 		}
 	}
 }
+
 
 //would block until Read() is called
 //mainly deal with out of order messages on each client
@@ -446,6 +459,7 @@ func (sClient *s_client) clientMain(s *server) {
 				sClient.seqExpected += 1
 				//go through pending messages and check if already received the next
 				//message in order, check againt client.seqExpected
+				sClient.messageToPush = nil
 				for i := 0; i < len(sClient.pendingMessages); i++ {
 					message := sClient.pendingMessages[i]
 					if message.SeqNum == sClient.seqExpected {
@@ -497,6 +511,9 @@ func (sClient *s_client) clientMain(s *server) {
 				
 
 			case seqNum := <- sClient.resendSuccessChan:
+				if (seqNum < sClient.windowStart) {//if sth already passed
+					continue
+				}
 				index := seqNum - sClient.windowStart
 				sClient.window[index].ackChan <-1 //let resendRoutine for this message stop
 				sClient.window[index] = nil
@@ -591,7 +608,7 @@ func (sClient *s_client) clientMain(s *server) {
 					msg: msg, 
 				}
 				// the below condition is ** key **
-				fmt.Println("writing for seqNum message of: "+strconv.Itoa(seqNum)+ "for client"+strconv.Itoa(sClient.connID)+", with windowStart,windowSize being:" + strconv.Itoa(sClient.windowStart)+","+strconv.Itoa(len(sClient.window)))
+				//fmt.Println("writing for seqNum message of: "+strconv.Itoa(seqNum)+ "for client"+strconv.Itoa(sClient.connID)+", with windowStart,windowSize being:" + strconv.Itoa(sClient.windowStart)+","+strconv.Itoa(len(sClient.window)))
 
 
 				if (seqNum < sClient.windowStart + s.params.WindowSize && sClient.window[seqNum - sClient.windowStart] == nil){
@@ -605,6 +622,9 @@ func (sClient *s_client) clientMain(s *server) {
 				
 
 			case seqNum := <- sClient.resendSuccessChan:
+				if (seqNum < sClient.windowStart) {//if sth already passed
+					continue
+				}
 				index := seqNum - sClient.windowStart
 				sClient.window[index].ackChan <-1 //let resendRoutine for this message stop
 				sClient.window[index] = nil
@@ -655,7 +675,7 @@ func (sClient *s_client) clientMain(s *server) {
 				droppedMsg := &readReturn{
 					connID: sClient.connID,
 					seqNum: 0,
-					payload: make([]byte,0),
+					payload: nil,
 					err: errors.New("This client disconnected"),
 				}
 				s.readReturnChan <- droppedMsg
