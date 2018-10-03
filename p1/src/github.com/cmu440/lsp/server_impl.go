@@ -149,7 +149,8 @@ func (s *server) Write(connID int, payload []byte) error {
 		connID:  connID,
 		payload: payload,
 	}
-	// fmt.Println("server: before send write request")
+	fmt.Println("server: before send write request for" )
+	fmt.Println(payload)
 	s.writeRequestChan <- request
 	err := <-s.writeBackChan
 	return err
@@ -386,18 +387,25 @@ func (c *s_client) alreadyReceived(seq int) bool {
 
 func (sClient *s_client) resendRoutine(elem *windowElem, s *server) {
 	//wrtie to client, potentially sending message to server's main routine to handle
+
 	s.serverConn.WriteToUDP(elem.msg, sClient.addr)
+	fmt.Println("Sent message with Seq: " + strconv.Itoa(elem.seqNum))
 	maxBackOff := s.params.MaxBackOffInterval
 	curBackOff := 0
 	epochPassed := 0
+	//fmt.Println("epoch time is :",s.params.EpochMillis)
 	timer := time.NewTimer(time.Duration(s.params.EpochMillis) * time.Millisecond)
 
 	for {
 		select{
+		case <- elem.ackChan:
+			return
 		case <- timer.C://resend
 			if (epochPassed >= curBackOff){
 				epochPassed = 0
+				fmt.Println("server resend", time.Now())
 				s.serverConn.WriteToUDP(elem.msg, sClient.addr)
+				fmt.Println("Resend message with Seq : " + strconv.Itoa(elem.seqNum))
 				if (curBackOff ==0){
 					curBackOff = min(curBackOff+1,maxBackOff)
 				} else {
@@ -407,9 +415,8 @@ func (sClient *s_client) resendRoutine(elem *windowElem, s *server) {
 				epochPassed += 1
 			}
 			
-			timer = time.NewTimer(time.Duration( s.params.EpochMillis) * time.Millisecond)
-		case <- elem.ackChan:
-			return
+			//timer = time.NewTimer(time.Duration( s.params.EpochMillis + 500) * time.Millisecond)
+		
 		}
 	}
 }
@@ -534,11 +541,13 @@ func (sClient *s_client) clientMain(s *server) {
 				
 
 			case seqNum := <- sClient.resendSuccessChan:
+				fmt.Println("server: got Ack for message: ",seqNum)
 				if (seqNum < sClient.windowStart) {//if sth already passed
 					continue
 				}
 				index := seqNum - sClient.windowStart
 				sClient.window[index].ackChan <-1 //let resendRoutine for this message stop
+				fmt.Println("server: ended resendRoutine for it ")
 				sClient.window[index] = nil
 				window := sClient.window
 				if index == 0{//need to update windowStart

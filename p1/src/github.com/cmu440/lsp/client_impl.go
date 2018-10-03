@@ -202,9 +202,13 @@ func integrityCheck(msg *Message) bool {
 	}
 	actualLen := len(msg.Payload)
 	expectedLen := msg.Size
+	if actualLen > expectedLen {
+		msg.Payload = msg.Payload[:expectedLen]
+	}
 	actualChecksum := makeCheckSum(msg.ConnID, msg.SeqNum, msg.Size, msg.Payload)
 	expectedChecksum := msg.Checksum
-	return (actualLen == expectedLen) && (actualChecksum == expectedChecksum)
+	//fmt.Println("")
+	return (actualLen >= expectedLen) && (actualChecksum == expectedChecksum)
 
 }
 func (c *client) received(seq int) bool {
@@ -446,6 +450,8 @@ func (c *client) mainRoutine() {
 				c.seqExpected += 1
 				//go through pending messages and check if already received the next
 				//message in order, check againt client.seqExpected
+				fmt.Println("Message pushed: "+ strconv.Itoa(c.seqExpected) +"message is : "+strconv.Itoa(c.messageToPush.seqNum))
+				
 				c.messageToPush = nil
 				for i := 0; i < len(c.pendingMessages); i++ {
 					message := c.pendingMessages[i]
@@ -486,7 +492,21 @@ func (c *client) readRoutine() {
 				//fmt.Println(b)
 				unmarshal(b[:n], &message) //unMarshall returns *Message
 				// fmt.Println("client: after unmarshal, integrity checks now")
-				if integrityCheck(&message) { //check integrity here with checksum and size
+				actualLen := len(message.Payload)
+				expectedLen := message.Size
+				//fmt.Println("actualLength is: " + strconv.Itoa(actualLen)+ "expectedLen is : " + strconv.Itoa(expectedLen))
+				if actualLen > expectedLen {
+					message.Payload = message.Payload[:expectedLen]
+				}
+				actualChecksum := makeCheckSum(message.ConnID, message.SeqNum, message.Size, message.Payload)
+				expectedChecksum := message.Checksum
+
+				if message.Type == MsgConnect || message.Type == MsgAck || ((actualLen >= expectedLen) && (actualChecksum == expectedChecksum)){
+					//fmt.Println("message good actualLength is:" + strconv.Itoa(actualLen)+ "expectedLen is :" + strconv.Itoa(expectedLen) + "with Client: " + strconv.Itoa(c.connID))
+					//fmt.Println("message has seqNumber: " + strconv.Itoa(message.SeqNum))
+					//fmt.Println("\n")
+//check integrity here with checksum and size
+					//fmt.Println("message Size: " )
 					c.gotMessageChan <- 1 //reset timer in timeRoutine, got some message
 					if message.Type == MsgData {
 						// fmt.Println("client: it's data message!")
@@ -507,13 +527,18 @@ func (c *client) readRoutine() {
 						}
 					 
 					} else {
-						fmt.Println("client: this message is wrong type")
+						fmt.Println("client: this message is wrong type with client" )
 					}
 					//if its ACK, do sth later for epoch
+				} else{
+
+					fmt.Println("client: got corrupted message！with Client: "+ strconv.Itoa(c.connID) +" with Message: " + strconv.Itoa(message.SeqNum))
+					//fmt.Println("\n")
+
 				}
 			} else if c.connID != -1{ //deal with error when connection set up already
-				fmt.Println("client: got error")
-				return //connection lost?
+				fmt.Println("client: got error reading!")
+				//return //connection lost?
 			}
 		}
 
