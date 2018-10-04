@@ -149,8 +149,8 @@ func (s *server) Write(connID int, payload []byte) error {
 		connID:  connID,
 		payload: payload,
 	}
-	fmt.Println("server: before send write request for" )
-	fmt.Println(payload)
+	//fmt.Println("server: before send write request for" )
+	//fmt.Println(payload)
 	s.writeRequestChan <- request
 	err := <-s.writeBackChan
 	return err
@@ -161,7 +161,7 @@ func (s *server) CloseConn(connID int) error {
 	sClient := <- s.searchClientReturnChan
 	if sClient != nil {
 		sClient.clientCloseChan <- 1
-		s.clientRemoveChan <- sClient.connID //could have issues, if removing client
+		//s.clientRemoveChan <- sClient.connID //could have issues, if removing client
 		return nil
 	}
 	return errors.New("connection already closed")
@@ -188,7 +188,7 @@ func (s *server) mainRoutine() {
 		case addr := <- s.searchClientRequestChan:
 			c := s.searchClient(addr)
 			s.searchClientReturnChan <- c
-		case connID := <-s.clientRemoveChan:
+		case connID := <-s.clientRemoveChan://gets called after sClient has finished sending all pendingMessages
 			for i := 0; i < len(s.connectedClients); i++ {
 				if s.connectedClients[i].connID == connID {
 					s.connectedClients = append(s.connectedClients[:i], s.connectedClients[i+1:]...)
@@ -389,7 +389,7 @@ func (sClient *s_client) resendRoutine(elem *windowElem, s *server) {
 	//wrtie to client, potentially sending message to server's main routine to handle
 
 	s.serverConn.WriteToUDP(elem.msg, sClient.addr)
-	fmt.Println("Sent message with Seq: " + strconv.Itoa(elem.seqNum))
+	//fmt.Println("Sent message with Seq: " + strconv.Itoa(elem.seqNum))
 	maxBackOff := s.params.MaxBackOffInterval
 	curBackOff := 0
 	epochPassed := 0
@@ -403,9 +403,9 @@ func (sClient *s_client) resendRoutine(elem *windowElem, s *server) {
 		case <- timer.C://resend
 			if (epochPassed >= curBackOff){
 				epochPassed = 0
-				fmt.Println("server resend", time.Now())
+				//fmt.Println("server resend", time.Now())
 				s.serverConn.WriteToUDP(elem.msg, sClient.addr)
-				fmt.Println("Resend message with Seq : " + strconv.Itoa(elem.seqNum))
+				//fmt.Println("Resend message with Seq : " + strconv.Itoa(elem.seqNum))
 				if (curBackOff ==0){
 					curBackOff = min(curBackOff+1,maxBackOff)
 				} else {
@@ -415,7 +415,7 @@ func (sClient *s_client) resendRoutine(elem *windowElem, s *server) {
 				epochPassed += 1
 			}
 			
-			//timer = time.NewTimer(time.Duration( s.params.EpochMillis + 500) * time.Millisecond)
+			timer = time.NewTimer(time.Duration( s.params.EpochMillis + 500) * time.Millisecond)
 		
 		}
 	}
@@ -466,6 +466,7 @@ func (sClient *s_client) clientMain(s *server) {
 
 		select {
 			case <-sClient.clientCloseChan: //CloseConn or Close called
+				//set sth to true
 				return
 			case message := <-sClient.messageChan:
 				if message.SeqNum > sClient.seqExpected {
@@ -541,15 +542,20 @@ func (sClient *s_client) clientMain(s *server) {
 				
 
 			case seqNum := <- sClient.resendSuccessChan:
-				fmt.Println("server: got Ack for message: ",seqNum)
+				//fmt.Println("server: got Ack for message: ",seqNum)
 				if (seqNum < sClient.windowStart) {//if sth already passed
 					continue
 				}
 				index := seqNum - sClient.windowStart
 				sClient.window[index].ackChan <-1 //let resendRoutine for this message stop
-				fmt.Println("server: ended resendRoutine for it ")
+				//fmt.Println("server: ended resendRoutine for it ")
 				sClient.window[index] = nil
 				window := sClient.window
+
+				//if the flag is true, check if window is all nil, len(writeBuffer ) ==0 
+				//all resendRoutine should be stopped, and stop the timeRoutine for this client
+				//and send itself to s.clientRemoveChan
+
 				if index == 0{//need to update windowStart
 					buffer := sClient.writeBuffer
 					offset := 0
@@ -592,6 +598,7 @@ func (sClient *s_client) clientMain(s *server) {
 						} 
 					}
 				s.clientRemoveChan <- sClient.connID//let server know it's dropped
+				//probably push things in pending Messages 
 				droppedMsg := &readReturn{
 					connID: sClient.connID,
 					seqNum: 0,

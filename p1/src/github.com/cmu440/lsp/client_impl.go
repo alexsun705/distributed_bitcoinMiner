@@ -160,9 +160,13 @@ func (c *client) Write(payload []byte) error {
 }
 
 func (c *client) Close() error {
+	//fmt.Println("Start Close")
 	c.mainCloseChan <- 1
+	//fmt.Println("Sent close to Main")
 	c.readCloseChan <- 1
+	//fmt.Println("Sent close to Read")
 	c.timeCloseChan <- 1
+	//fmt.Println("Sent close to Time")
 	return nil
 }
 
@@ -281,22 +285,12 @@ func (c *client) timeRoutine() {
 			reminderTimer = time.NewTimer(time.Duration(epoch)*time.Millisecond)
 			connDropTimer = time.NewTimer(time.Duration(epoch*epochLimit)*time.Millisecond)
 		case <- c.timeCloseChan:
+			fmt.Println("timeRoutine closed")
 			return
 		}
 	}
 }
-func (c *client) searchWindow(seqNum int) int {
-	seq := 0
-	for i := 0; i < c.params.WindowSize; i++ {
-		if c.window[i] != nil{
-			seq = c.window[i].seqNum
-			if (seq == seqNum){
-				return i
-			}
-		}
-	}
-	return -1
-}
+
 func (c *client) mainRoutine() {
 	for {
 		// var readReturnChan chan *readReturn = nil
@@ -315,6 +309,8 @@ func (c *client) mainRoutine() {
 							c.window[i].ackChan <- 1 //stop the resend routine for each message
 						} 
 					}
+				fmt.Println("Main Closed")
+				c.clientConn.Close()
 				return
 
 			case <- c.connDropChan: //conneciton dropped
@@ -376,6 +372,8 @@ func (c *client) mainRoutine() {
 				c.window[index].ackChan <-1 //let resendRoutine for this message stop
 				c.window[index] = nil
 				window := c.window
+				//check if window is all nil and length of writeBuffer is 0, send 1 to timeRoutine  and readRoutine and return
+				
 				if index == 0{
 					offset := 0
 					for i := 0; i < c.params.WindowSize; i ++ {
@@ -450,7 +448,7 @@ func (c *client) mainRoutine() {
 				c.seqExpected += 1
 				//go through pending messages and check if already received the next
 				//message in order, check againt client.seqExpected
-				fmt.Println("Message pushed: "+ strconv.Itoa(c.seqExpected) +"message is : "+strconv.Itoa(c.messageToPush.seqNum))
+				//fmt.Println("Message pushed: "+ strconv.Itoa(c.seqExpected) +"message is : "+strconv.Itoa(c.messageToPush.seqNum))
 				
 				c.messageToPush = nil
 				for i := 0; i < len(c.pendingMessages); i++ {
@@ -479,12 +477,14 @@ func (c *client) readRoutine() {
 	for {
 		select {
 		case <- c.readCloseChan:
+			fmt.Println("read Closed")
 			return
 		default:
+			//fmt.Println("Client: started ReadRoutine")
 			b := make([]byte, 2000)
 			n, err := c.clientConn.Read(b)
 
-			//fmt.Println(b)
+			
 			//_ = m
 			if err == nil { //deal with error later
 				var message Message
@@ -540,6 +540,7 @@ func (c *client) readRoutine() {
 				fmt.Println("client: got error reading!")
 				//return //connection lost?
 			}
+			//fmt.Println("Client: ended ReadRoutine")
 		}
 
 	}
