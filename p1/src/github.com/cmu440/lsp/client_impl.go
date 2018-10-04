@@ -42,8 +42,10 @@ type client struct {
 	mainCloseChan     chan int
 	readCloseChan     chan int
 	timeCloseChan 	  chan int
+	allClosedChan	  chan int
 	// below is for partA
 	connDropped bool
+	aboutToClose bool
 	window [] *windowElem // the window that contains all the elements that are trying to resend
     windowStart int
     addToWindowChan chan *windowElem
@@ -99,7 +101,9 @@ func NewClient(hostport string, params *Params) (Client, error) {
 		mainCloseChan:     make(chan int),
 		readCloseChan:     make(chan int),
 		timeCloseChan: 	   make(chan int),
+		allClosedChan:	   make(chan int),
 		connDropped: false,
+		aboutToClose: false,
 		window: make([] *windowElem, params.WindowSize),// the window that contains all the elements that are trying to resend
     	windowStart: 1,
     	resendSuccessChan: make(chan int),
@@ -154,6 +158,9 @@ func (c *client) Read() ([]byte, error) {
 
 func (c *client) Write(payload []byte) error {
 	// fmt.Println("client: before send write request")
+	if c.connDropped == true{
+		return errors.New("Connection closed/dropped already")
+	}
 	c.writeChan <- payload
 	res := <-c.writeBackChan
 	return res
@@ -162,11 +169,7 @@ func (c *client) Write(payload []byte) error {
 func (c *client) Close() error {
 	//fmt.Println("Start Close")
 	c.mainCloseChan <- 1
-	//fmt.Println("Sent close to Main")
-	c.readCloseChan <- 1
-	//fmt.Println("Sent close to Read")
-	c.timeCloseChan <- 1
-	//fmt.Println("Sent close to Time")
+	<- c.allClosedChan 
 	return nil
 }
 
@@ -279,8 +282,7 @@ func (c *client) timeRoutine() {
 				c.connIDChan <- 0//let NewClient know it failed connecting to server
 				return
 			}
-			c.connDropChan <- 1
-			return
+			 
 		case <- c.gotMessageChan://got sth, reset timmer
 			reminderTimer = time.NewTimer(time.Duration(epoch)*time.Millisecond)
 			connDropTimer = time.NewTimer(time.Duration(epoch*epochLimit)*time.Millisecond)
@@ -290,7 +292,25 @@ func (c *client) timeRoutine() {
 		}
 	}
 }
-
+func (c *client) checkAllSent() bool {
+	ifAllNil := true
+	for i := 0; i < c.params.WindowSize; i++ {
+		if c.window[i] != nil{
+			ifAllNil = false
+		}
+	}
+	if ifAllNil {
+		return len(c.writeBuffer) == 0
+	}
+	return false
+}
+func (c *client) terminateAll(){ //terminate all routine
+	c.connDropped = true
+	c.clientConn.Close()
+	c.readCloseChan <- 1
+	c.timeCloseChan <- 1
+	c.allClosedChan <- 1
+}
 func (c *client) mainRoutine() {
 	for {
 		// var readReturnChan chan *readReturn = nil
@@ -304,29 +324,38 @@ func (c *client) mainRoutine() {
 		}
 		select {
 			case <-c.mainCloseChan:
-				for i := 0; i < c.params.WindowSize; i ++ {
-						if c.window[i] != nil{
-							c.window[i].ackChan <- 1 //stop the resend routine for each message
-						} 
-					}
-				fmt.Println("Main Closed")
-				c.clientConn.Close()
-				return
+				c.aboutToClose = true
+				if c.checkAllSent(){
+					c.terminateAll()
+					return
+				}
+				
 
 			case <- c.connDropChan: //conneciton dropped
-				for i := 0; i < c.params.WindowSize; i ++ {
+				if c.aboutToClose{//server timed out during Close()
+					for i := 0; i < c.params.WindowSize; i ++ {
 						if c.window[i] != nil{
 							c.window[i].ackChan <- 1 //stop the resend routine for each message
 						} 
 					}
-				c.connDropped = true
-				droppedMsg := &readReturn{
-					connID: c.connID,
-					seqNum: 0,
-					payload: nil,
-					err: errors.New("This client disconnected"),
+					//ignore the pendingMessages as well
+					c.terminateAll()
+					return
 				}
-				c.readReturnChan <- droppedMsg
+				//regular server time out 
+				c.connDropped = true
+				//if no messages to push at the moment
+				if c.messageToPush == nil {
+					droppedMsg := &readReturn{
+						connID: c.connID,
+						seqNum: -1,
+						payload: nil,
+						err: errors.New("This client disconnected"),
+					}
+					c.readReturnChan <- droppedMsg //might block
+					return // not sure :(
+				}
+				
 				
 
 			//write channels called from Write()
@@ -373,7 +402,11 @@ func (c *client) mainRoutine() {
 				c.window[index] = nil
 				window := c.window
 				//check if window is all nil and length of writeBuffer is 0, send 1 to timeRoutine  and readRoutine and return
-				
+				if c.aboutToClose && c.checkAllSent(){ //check if no other messages left to send out and about to close
+					c.terminateAll()
+					return
+				}
+
 				if index == 0{
 					offset := 0
 					for i := 0; i < c.params.WindowSize; i ++ {
@@ -467,6 +500,16 @@ func (c *client) mainRoutine() {
 						break //make sure only push one message to the read()
 					}
 				}
+				if c.messageToPush == nil && c.connDropped{ //if connection dropped and no more message to be Read
+					droppedMsg := &readReturn{
+						connID: c.connID,
+						seqNum: -1,
+						payload: nil,
+						err: errors.New("This client disconnected"),
+					}
+					c.readReturnChan <- droppedMsg //might block
+					return //?not sure
+				}
 			
 		 
 		}
@@ -536,10 +579,10 @@ func (c *client) readRoutine() {
 					//fmt.Println("\n")
 
 				}
-			} else if c.connID != -1{ //deal with error when connection set up already
-				fmt.Println("client: got error reading!")
+			} //else if c.connID != -1{ //deal with error when connection set up already
+				//fmt.Println("client: got error reading for Client: ", c.connID)
 				//return //connection lost?
-			}
+			//}
 			//fmt.Println("Client: ended ReadRoutine")
 		}
 
