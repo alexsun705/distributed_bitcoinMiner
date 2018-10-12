@@ -33,6 +33,7 @@ type clientRequest struct {
 	minHash uint64
 	minNonce uint64
 	totalResponses uint64 // the number of responses received so far
+	dropped bool // if the client is being dropped
 }
 
 type minerResult struct {
@@ -96,6 +97,7 @@ func (S *server) readRoutine(){
 				minHash: maxUint, // same as uninitialized
 				minNonce: maxUint, // same as uninitialized
 				respnoses: 0,
+				dropped: false,
 			}
 			S.eClientRequestChan <- newRequest
 		} else if (msg.Type == bitcoin.Join){
@@ -128,11 +130,36 @@ func (S *server) mainRoutine() {
 		
 
 		case miner := <- S.eMinerJoinChan:
+			// this is the timing to check the dropped miner array
+			if (len(S.droppedMinerArray) != 0){
+				droppedMiner = S.droppedMinerArray[0]
+				curr := S.currRequest
+				miner.data = droppedMiner.data // although not necessary
+				miner.lower = droppedMiner.lower 
+				miner.upper = droppedMiner.upper
+				miner.available = false
+				// write to the miner
+				minerID := miner.minerID
+				msg := bitcoin.NewRequest(miner.data, miner.lower, miner.upper)
+				payload, _ := lsp.marshal(msg)
+				lsp.Write(minerID, payload)
+				// change the responsible miner in the request
+				// must be in the request
+				for i := 0; i < len(curr.responsibleMiners); i++ {
+					if curr.responsibleMiners[i] == droppedMiner.minerID{
+						curr.responsibleMiners[i] = miner.minerID
+					}
+				}
+				S.droppedMinerArray = S.droppedMinerArray[1:]
+			}
 			append(S.minersArray, miner)
 
 		case result := <- S.eMinerResultChan:
 			curr := S.currRequest
-			id = result.minerID
+			if (curr == nil){
+				continue
+			}
+			id := result.minerID
 			hash := result.hash
 			nonce := result.nonce
 			// if the message is from a dropped miner, then don't need to 
@@ -154,14 +181,40 @@ func (S *server) mainRoutine() {
 				if miner.minerID == id {
 					// we have found the miner
 					miner.available = true
+
+					// check the dropped miner chan
+					if (len(S.droppedMinerArray) != 0){
+						droppedMiner = S.droppedMinerArray[0]
+						miner.data = droppedMiner.data // although not necessary
+						miner.lower = droppedMiner.lower 
+						miner.upper = droppedMiner.upper
+						miner.available = false
+						// write to the miner
+						minerID := miner.minerID
+						msg := bitcoin.NewRequest(miner.data, miner.lower, miner.upper)
+						payload, _ := lsp.marshal(msg)
+						lsp.Write(minerID, payload)
+						// change the responsible miner in the request
+						// must be in the request
+						for i := 0; i < len(curr.responsibleMiners); i++ {
+							if curr.responsibleMiners[i] == droppedMiner.minerID{
+								curr.responsibleMiners[i] = miner.minerID
+							}
+						}
+						S.droppedMinerArray = S.droppedMinerArray[1:]
+					}
 					break
 				}
 			}
-			if curr.responses == len(curr.responsibleMiners){
+			// now need to send the final result back to the client
+			if curr.responses == len(curr.responsibleMiners) { 
 				// now should send the result back to the client
 				result := bitcoin.NewResult(curr.minHash, curr.minNonce)
 				payload, _ := lsp.marshal(result)
-				lsp.Write(curr.connID, payload)
+				// only write back to the client if the current resquest is not dropped
+				if (!curr.dropped){
+					lsp.Write(curr.connID, payload)
+				}
 				// close this client
 				S.currRequest = nil
 				// add a new client in if there is any
@@ -208,6 +261,10 @@ func (S *server) mainRoutine() {
 			index := indexInArray(S.minersArray, connID)
 			droppedMiner := minersArray[index] 
 			S.minersArray = append(S.minersArray[:index], S.minersArray[index+1:]...)
+			// no need to do the following steps if there is no curr or curr is dropped
+			if (curr == nil || curr.dropped){
+				continue
+			}
 			// check if there is available miner
 			availableID := -1
 			for i := 0; i < len(S.minersArray); i++ {
@@ -242,6 +299,28 @@ func (S *server) mainRoutine() {
 				// just append to the dropped miner array
 				// wait for later times when a miner frees up or a new miner joins
 				S.droppedMinerArray = append(S.droppedMinerArray, droppedMiner)
+			}
+
+		case requestID := <- S.dropClientChan:
+			// if curr request is being dropped
+			if (S.currRequest != nil && requestID == S.currRequest.connID){
+				// need to drop this request
+				S.currRequest.dropped = true
+				// make all miners available
+				for i := 0; i < len(S.minersArray); i++ {
+					miner := S.minersArray[i]
+					miner.available = true
+				}
+				// empty the dropped miner array
+				S.droppedMinerArray = make([]*miner, 0)
+			}
+			// if a waiting request is being dropped
+			for i, request := range S.requestWaitingArray {
+				if request.connID == requestID {
+					// we need to throw this request away
+					S.requestWaitingArray = append(S.requestWaitingArray[:i], S.requestWaitingArray[i+1:]...)
+					break
+				}
 			}
 
 	}
@@ -313,4 +392,5 @@ func main() {
 	defer srv.lspServer.Close()
 
 	// TODO: implement this!
+	startServer(port)
 }
