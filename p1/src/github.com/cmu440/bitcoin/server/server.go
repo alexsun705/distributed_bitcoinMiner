@@ -19,8 +19,7 @@ type server struct {
 	eClientRequestChan chan *clientRequest // NewRequest
 	eMinerJoinChan chan *miner // NewJoin
 	eMinerResultChan chan *minerResult // NewResult
-	processRequestChan chan *clientRequest
-	dropChan chan int
+	dropChan chan int //drop from either miner or client
 	requestWaitingArray []*clientRequest // all queueing requests that has not been processed
 	currRequest *clientRequest // the current request being processed
 	minersArray []*miner
@@ -95,7 +94,7 @@ func (S *server) readRoutine(){
 				upper: msg.Upper,
 				minHash: maxUint, // same as uninitialized
 				minNonce: maxUint, // same as uninitialized
-				respnoses: 0,
+				responses: 0,
 				dropped: false,
 			}
 			S.eClientRequestChan <- newRequest
@@ -234,7 +233,7 @@ func (S *server) mainRoutine() {
 						minerID := miner.minerID
 						msg := bitcoin.NewRequest(miner.data, miner.lower, miner.upper)
 						payload, _ := lsp.marshal(msg)
-						lsp.Write(minerID, payload)
+						S.lspServer.Write(minerID, payload)
 						// change the responsible miner in the request
 						// must be in the request
 						for i := 0; i < len(curr.responsibleMiners); i++ {
@@ -266,7 +265,7 @@ func (S *server) mainRoutine() {
 				}
 			}			
 		case connID := <- S.dropChan:
-			if inList(S.minersArray, connID) {
+			if inList(S.minersArray, connID) {//if miner dropped
 				minerID := connID
 				curr := S.currRequest
 				index := indexInArray(S.minersArray, connID)
@@ -311,7 +310,7 @@ func (S *server) mainRoutine() {
 					// wait for later times when a miner frees up or a new miner joins
 					S.droppedMinerArray = append(S.droppedMinerArray, droppedMiner)
 				}
-			} else{
+			} else { //if client dropped
 				requestID := connID
 				// if curr request is being dropped
 				if (S.currRequest != nil && requestID == S.currRequest.connID){
@@ -351,7 +350,6 @@ func StartServer(port int) (*server, error) {
 		eClientRequestChan: make(chan *Message),
 		eMinerJoinChan: make(chan *miner),
 		eMinerResultChan: make(chan *Message),
-		processRequestChan: make(chan *clientRequest),
 		requestWaitingArray: make([]*clientRequest, 0),
 		dropChan: make(chan int),
 		currRequest:nil,
@@ -363,7 +361,6 @@ func StartServer(port int) (*server, error) {
 }
 
 var LOGF *log.Logger
-
 func main() {
 	// You may need a logger for debug purpose
 	const (
