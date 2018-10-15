@@ -5,8 +5,6 @@ package lsp
 import (
 	"errors"
 	"github.com/cmu440/lspnet"
-	//"github.com/cmu440/lspnet" ********* need to use this on autolab
-	//"fmt"
 	"strconv"
 	"strings"
 	"time"
@@ -129,12 +127,9 @@ func NewServer(port int, params *Params) (Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	//fmt.Println("NewServer: windowSize is: "+ strconv.Itoa(params.WindowSize))
 	s.serverAddr = adr
-	// fmt.Println(s.serverAddr)
 	conn, err := lspnet.ListenUDP("udp", s.serverAddr)
 	if err != nil {
-		//fmt.Println("server: error")
 		return nil, err
 	}
 	s.serverConn = conn
@@ -155,8 +150,6 @@ func (s *server) Write(connID int, payload []byte) error {
 		connID:  connID,
 		payload: payload,
 	}
-	//fmt.Println("server: before send write request for" )
-	//fmt.Println(payload)
 	s.writeRequestChan <- request
 	err := <-s.writeBackChan
 	return err
@@ -167,7 +160,6 @@ func (s *server) CloseConn(connID int) error {
 	sClient := <-s.searchClientReturnChan
 	if sClient != nil {
 		sClient.clientCloseChan <- 1
-		//s.clientRemoveChan <- sClient.connID //could have issues, if removing client
 		return nil
 	}
 	return errors.New("connID doesn't exist")
@@ -216,7 +208,6 @@ func (s *server) mainRoutine() {
 				return
 			}
 		case request := <-s.connectChan: //set up connection
-			//fmt.Println("server: got request to connect")
 			message := request.message
 			if message.Type == MsgConnect { //start a new server side client
 				c := &s_client{ //need to adapt to new struct
@@ -240,10 +231,7 @@ func (s *server) mainRoutine() {
 				}
 				s.curClientConnID += 1
 				s.connectedClients = append(s.connectedClients, c)
-				// fmt.Printf("%v", s.connectedClients)
-				//fmt.Println("server: send new client struct back")
 				s.newClientChan <- c //let read routine create ack request
-				//fmt.Println("server: start client Main routine")
 				go c.clientMain(s)
 				go c.clientTime(s)
 			}
@@ -270,21 +258,15 @@ func (s *server) mainRoutine() {
 
 		// write ack to client when getting a data message
 		case ackRequest := <-s.writeAckChan:
-			// fmt.Println("server: got ack sending request")
 			ack := ackRequest.ack
 			sClient := ackRequest.client
 
 			byteMessage, err := marshal(ack)
-			// fmt.Println("server: marshalled it")
 			_ = err                //deal with later?
 			message1 := &Message{} //store message
 
 			unmarshal(byteMessage, message1) //unMarshall returns *Message
-			// fmt.Println(byteMessage)
-			num, err := s.serverConn.WriteToUDP(byteMessage, sClient.addr)
-			//fmt.Println("server: finished sending ack")
-			_ = num
-			_ = err //deal with later?
+			s.serverConn.WriteToUDP(byteMessage, sClient.addr)
 		}
 	}
 }
@@ -299,16 +281,12 @@ func (s *server) searchClientToClose(connID int) *s_client {
 }
 
 func (s *server) searchClient(addr *lspnet.UDPAddr) *s_client {
-	// fmt.Println("server: entered search")
 	for i := 0; i < len(s.connectedClients); i++ {
 		sClient := s.connectedClients[i]
-		// fmt.Println("server: client not nil")
 		if strings.Compare(sClient.addr.String(), addr.String()) == 0 {
-			// fmt.Println("server: this is received client connecting again")
 			return sClient
 		}
 	}
-	// fmt.Println("server: newClient!")
 	return nil
 }
 func (s *server) readRoutine() {
@@ -319,19 +297,11 @@ func (s *server) readRoutine() {
 		default:
 			serverConn := s.serverConn
 			b := make([]byte, 2000)
-			//fmt.Println("server: before read")
-
 			size, addr, err := serverConn.ReadFromUDP(b)
-
-			//fmt.Println("server: got message")
 			if err == nil { //deal with error later
 				var message Message           //store message
 				unmarshal(b[:size], &message) //unMarshall returns *Message
-				// fmt.Println("server: get message type is "+strconv.Itoa(int(message.Type))+" and connID: "+strconv.Itoa(int(message.ConnID)))
-				//fmt.Println("server: after unmarshal")
 				if integrityCheck(&message) { //check integrity here with checksum and size
-					//fmt.Println("server: integrity check passed")
-
 					//notify c.clientTime that got some message from this client
 					s.searchClientRequestChan <- addr
 
@@ -342,8 +312,6 @@ func (s *server) readRoutine() {
 					}
 					//deal with differenet types of messages
 					if message.Type == MsgData {
-						//fmt.Println("got data message from client" + strconv.Itoa(sClient.connID)+"\n")
-						//sClient := s.searchClient(addr) //make sure client connected
 						if sClient != nil {
 							sClient.messageChan <- &message
 							//else if seq <seqExpected, then don't worry about returning it to Read()
@@ -354,28 +322,21 @@ func (s *server) readRoutine() {
 							&message,
 							addr,
 						}
-						//fmt.Println("server: before searchClient")
 						//check if the client is already connected on the server end
 						//newClient := s.searchClient(addr)
 						var newClient *s_client = nil
 						if sClient == nil { //first connect message
-							//fmt.Println("server: send message to connectChan")
 							s.connectChan <- request
-							//fmt.Println("server: wait for newClient struct")
 							newClient = <-s.newClientChan //wait for new client from main
-							//fmt.Println("server: got newClient struct!")
 						} else {
-							//fmt.Println("server: already a received client")
 							newClient = sClient
 						}
 						//make new server side client struct in mainRoutine
-						// fmt.Println("server: making ack request back for connID:"+strconv.Itoa(sClient.connID))
 						ack := NewAck(newClient.connID, 0)
 						ackRequest := &writeAckRequest{
 							ack:    ack,
 							client: newClient,
 						}
-						// fmt.Println("server: send ackRequest to mainRoutine")
 						s.writeAckChan <- ackRequest
 						//if its ACK, do sth later for epoch
 					} else if message.Type == MsgAck {
@@ -405,11 +366,9 @@ func (sClient *s_client) resendRoutine(elem *windowElem, s *server) {
 	//wrtie to client, potentially sending message to server's main routine to handle
 
 	s.serverConn.WriteToUDP(elem.msg, sClient.addr)
-	//fmt.Println("Sent message with Seq: " + strconv.Itoa(elem.seqNum))
 	maxBackOff := s.params.MaxBackOffInterval
 	curBackOff := 0
 	epochPassed := 0
-	//fmt.Println("epoch time is :",s.params.EpochMillis)
 	timer := time.NewTimer(time.Duration(s.params.EpochMillis) * time.Millisecond)
 
 	for {
@@ -419,9 +378,7 @@ func (sClient *s_client) resendRoutine(elem *windowElem, s *server) {
 		case <-timer.C: //resend
 			if epochPassed >= curBackOff {
 				epochPassed = 0
-				//fmt.Println("server resend", time.Now())
 				s.serverConn.WriteToUDP(elem.msg, sClient.addr)
-				//fmt.Println("Resend message with Seq : " + strconv.Itoa(elem.seqNum))
 				if curBackOff == 0 {
 					curBackOff = min(curBackOff+1, maxBackOff)
 				} else {
@@ -474,9 +431,6 @@ func (sClient *s_client) checkAllSent(s *server) bool {
 	return false
 }
 func (sClient *s_client) clientTerminateAll(s *server) { //terminate all routine
-	//c.connDropped = true
-	//c.clientConn.Close()
-	//c.readCloseChan <- 1
 	sClient.clientTimeCloseChan <- 1
 	s.clientRemoveChan <- sClient.connID //remove it self from connectedClient
 
@@ -488,13 +442,6 @@ func (sClient *s_client) clientTerminateAll(s *server) { //terminate all routine
 //message to s.readReturnChan when have one
 func (sClient *s_client) clientMain(s *server) {
 	for {
-		//if messageToPush is good, we would try to push to s.readReturnChan
-		// var readReturnChan chan *readReturn = nil
-		// if (sClient.messageToPush != nil && sClient.messageToPush.seqNum==sClient.seqExpected){
-		//     fmt.Println("server: readReturnChan is not Nil")
-		//     readReturnChan := s.readReturnChan
-		//     _ = readReturnChan
-		// }
 		var readReturnChan chan *readReturn
 		readReturnChan = nil
 
@@ -513,7 +460,6 @@ func (sClient *s_client) clientMain(s *server) {
 		case message := <-sClient.messageChan:
 			if sClient.aboutToClose == false { //ignore incoming data messages from the client if it's closed here
 				ack := NewAck(message.ConnID, message.SeqNum)
-				// fmt.Println("server: ack made")
 				ackRequest := &writeAckRequest{
 					ack:    ack,
 					client: sClient,
@@ -568,7 +514,7 @@ func (sClient *s_client) clientMain(s *server) {
 					err:     errors.New("This client disconnected"),
 				}
 				s.readReturnChan <- droppedMsg //might block
-				return                         //?not sure
+				return
 
 			}
 		// below two cases are for partA
@@ -604,13 +550,11 @@ func (sClient *s_client) clientMain(s *server) {
 			}
 
 		case seqNum := <-sClient.resendSuccessChan:
-			//fmt.Println("server: got Ack for message: ",seqNum)
 			if seqNum < sClient.windowStart { //if sth already passed
 				continue
 			}
 			index := seqNum - sClient.windowStart
 			sClient.window[index].ackChan <- 1 //let resendRoutine for this message stop
-			//fmt.Println("server: ended resendRoutine for it ")
 			sClient.window[index] = nil
 			window := sClient.window
 
@@ -681,7 +625,7 @@ func (sClient *s_client) clientMain(s *server) {
 				}
 				sClient.clientTerminateAll(s) //might block
 				s.readReturnChan <- droppedMsg
-				return //?not sure
+				return //terminate clientMain since won't be used anymore
 			}
 
 		}
