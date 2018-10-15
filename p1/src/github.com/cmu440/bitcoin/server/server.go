@@ -101,19 +101,33 @@ func marshal(msg *bitcoin.Message) ([]byte, error) {
 
 func unmarshal(data []byte, v *bitcoin.Message) error {
     err := json.Unmarshal(data, v)
+    // if (err != nil) {
+    //     fmt.Println("unmarshal: incorrect message")
+    // }
     return err
 }
 
+// func (S *server) printMinerArray() {
+//     l = S.minersArray
+//     d = S.droppedMinersArray
+//     fmt.Printf("Printing minersArray: ")
+//     for i := 0
+
+// }
+
 func (S *server) readRoutine(){
     for {
-        fmt.Println("inside read")
+        // fmt.Println("inside read")
         connID, bytes, err := S.lspServer.Read()
         if (err != nil){
             // one client or miner must be dropped
             S.dropChan <- connID
         }
         var msg bitcoin.Message
-        unmarshal(bytes, &msg)
+        err2 := unmarshal(bytes, &msg)
+        if (err2 != nil){
+            continue
+        }
         if (msg.Type == bitcoin.Request){
             // we have a new client request
             // arrayLength := msg.Upper - msg.Lower + 1
@@ -134,6 +148,7 @@ func (S *server) readRoutine(){
                 minerID: connID,
                 available: true,
             }
+            fmt.Printf("server: new miner's connID : %d \n", connID)
             S.eMinerJoinChan <- newMiner
         } else { // must be result
             res := &minerResult{
@@ -191,14 +206,15 @@ func (S *server) loadBalance(request *clientRequest) {
 
 func (S *server) mainRoutine() {
     for {
-        fmt.Println("inside main")
+        // fmt.Println("inside main")
         select{
         case request := <- S.eClientRequestChan:
             if len(S.requestWaitingArray) == 0 && S.currRequest == nil && len(S.minersArray) != 0 {
                 //set curRequest and loadBalance + write to all miners
-                fmt.Println("server: gonna do load balance")
+                fmt.Printf("server: client %d joined, gonna do load balance \n", request.connID)
                 S.loadBalance(request)
             } else {
+                fmt.Printf("server: client %d joined, add to wait array \n", request.connID)
                 S.requestWaitingArray = append(S.requestWaitingArray, request)
             }
         
@@ -236,6 +252,7 @@ func (S *server) mainRoutine() {
                     S.loadBalance(request)
                 }
             }
+            fmt.Printf("server: miner join %v, %v \n", S.minersArray, S.droppedMinersArray)
 
         case result := <- S.eMinerResultChan:
             curr := S.currRequest
@@ -309,11 +326,13 @@ func (S *server) mainRoutine() {
         case connID := <- S.dropChan:
             if inListMinersArray(S.minersArray, connID) {
                 // minerID := connID
+                fmt.Printf("server: miner %d dropped \n", connID)
                 curr := S.currRequest
                 index := indexInMinersArray(S.minersArray, connID)
                 droppedMiner := S.minersArray[index] 
                 S.minersArray = append(S.minersArray[:index], S.minersArray[index+1:]...)
                 // no need to do the following steps if there is no curr or curr is dropped
+                fmt.Printf("server: miner in array %v, %v \n", S.minersArray, S.droppedMinersArray)
                 if (curr == nil || curr.dropped){
                     continue
                 }
@@ -323,12 +342,13 @@ func (S *server) mainRoutine() {
                     miner := S.minersArray[i]
                     if miner.available {
                         // we have found an available miner
-                        availableID = miner.minerID
+                        availableID = i
                         break
                     }
                 }
 
                 if availableID != -1 {
+
                     miner := S.minersArray[availableID]
                     // change this miner's job to dropped miner's job
                     miner.data = droppedMiner.data // although not necessary
@@ -347,13 +367,16 @@ func (S *server) mainRoutine() {
                             curr.responsibleMiners[i] = miner.minerID
                         }
                     }
+                    fmt.Printf("server: there is available miner %v, %v \n", S.minersArray, S.droppedMinersArray)
                 } else {
                     // just append to the dropped miner array
                     // wait for later times when a miner frees up or a new miner joins
                     S.droppedMinersArray = append(S.droppedMinersArray, droppedMiner)
+                    fmt.Printf("server: no available miner %v, %v \n", S.minersArray, S.droppedMinersArray)
                 }
             } else{
                 requestID := connID
+                fmt.Printf("server: client %d dropped\n", connID)
                 // if curr request is being dropped
                 if (S.currRequest != nil && requestID == S.currRequest.connID){
                     // need to drop this request
