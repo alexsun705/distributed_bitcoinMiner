@@ -49,7 +49,7 @@ func evalRoutine(miner lsp.Client) {
         index = 0
         data := request.Data 
         lower := request.Lower // inclusive
-        upper := request.Upper // exclusive
+        upper := request.Upper+1 // inclusive bound, add 1 to include upper
         for i := lower; i < upper; i ++ {
             hash := bitcoin.Hash(data, i)
             if (hash < result){

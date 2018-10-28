@@ -84,7 +84,7 @@ func newWindowTestSystem(t *testing.T, mode windowTestMode, numClients, numMsgs 
 	t.Logf("Started server on port %d.", port)
 
 	// Start up the clients.
-	hostport := lspnet.JoinHostPort("localhost", strconv.Itoa(port))
+	hostport := lspnet.JoinHostPort("127.0.0.1", strconv.Itoa(port))
 	for i := 0; i < ts.numClients; i++ {
 		cli, err := NewClient(hostport, ts.params)
 		if err != nil {

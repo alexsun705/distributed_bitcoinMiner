@@ -340,16 +340,16 @@ func (c *client) mainRoutine() {
 				
 				if readReturnChan == nil {
 					
-					droppedMsg := &readReturn{
+					droppedMsg := &readReturn {
 						connID:  c.connID,
 						seqNum:  -1,
 						payload: nil,
 						err:     errors.New("This client disconnected"),
 					}
 					c.connDropped = true
-					c.clientConn.Close()
-					c.readCloseChan <- 1
-					c.timeCloseChan <- 1
+					//c.clientConn.Close()
+					//c.readCloseChan <- 1
+					//c.timeCloseChan <- 1
 					c.readReturnChan <- droppedMsg //might block
 
 					//return 

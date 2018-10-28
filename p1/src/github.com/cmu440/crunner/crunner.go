@@ -15,7 +15,7 @@ import (
 
 var (
 	port        = flag.Int("port", 9999, "server port number")
-	host        = flag.String("host", "localhost", "server host address")
+	host        = flag.String("host", "127.0.0.1", "server host address")
 	readDrop    = flag.Int("rdrop", 0, "network read drop percent")
 	writeDrop   = flag.Int("wdrop", 0, "network write drop percent")
 	epochLimit  = flag.Int("elim", lsp.DefaultEpochLimit, "epoch limit")
