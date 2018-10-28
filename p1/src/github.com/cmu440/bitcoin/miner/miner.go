@@ -36,7 +36,7 @@ func joinWithServer(hostport string) (lsp.Client, error) {
 func evalRoutine(miner lsp.Client) {
     for {
         payload, err := miner.Read()
-        fmt.Println("miner: got job")
+        // fmt.Println("miner: got job")
         if (err != nil){
             // should shut itself down in this case
             return
